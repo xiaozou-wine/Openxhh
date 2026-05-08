@@ -1,0 +1,6 @@
+log/
+*.json
+
+main
+main.exe
+*.png
