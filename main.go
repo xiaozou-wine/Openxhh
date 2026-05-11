@@ -60,7 +60,7 @@ func CheckNew() {
 func start(mode *string) {
 	switch *mode {
 	case "default":
-		loger.Loger.Info("\nHi,This is XhhRobot\nYou need start with a mode\n-mode start | login | test")
+		loger.Loger.Info("\nhttps://github.com/SomeOvO/xhhRobot\n你需要输入启动项\n-mode start | login | test")
 	case "test":
 		fmt.Println("hi")
 	case "login":
