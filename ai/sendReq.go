@@ -27,8 +27,9 @@ type SysMsg struct {
 	Content string `json:"content"`
 }
 type BodyStruct struct {
-	Model string `json:"model"`
-	Msgs  []any  `json:"messages"`
+	Model  string `json:"model"`
+	Msgs   []any  `json:"messages"`
+	Stream bool   `json:"stream"`
 }
 
 type choice struct {
