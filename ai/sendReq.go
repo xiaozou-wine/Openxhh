@@ -13,8 +13,10 @@ import (
 
 type Content struct {
 	Type   string `json:"type"`
-	ImgUrl string `json:"image_url"`
-	Text   string `json:"text"`
+	ImgUrl struct {
+		Url string `json:"url"`
+	} `json:"image_url"`
+	Text string `json:"text"`
 }
 type Messages[T []Content | string] struct {
 	Role    string `json:"role"`

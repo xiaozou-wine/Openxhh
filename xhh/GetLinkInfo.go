@@ -73,7 +73,7 @@ func GetLinkInfo(LinkID int, CommentID int) (Contents []ai.Content, Topics []ai.
 		}
 		if v.Type != "text" {
 			content.Type = "image_url"
-			content.ImgUrl = v.Url
+			content.ImgUrl.Url = v.Url
 			Contents = append(Contents, content)
 			continue
 		}
