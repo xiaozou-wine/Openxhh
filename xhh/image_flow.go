@@ -49,7 +49,7 @@ func ProcessImageGenerationComment(linkID, commentID, rootID, userID int, text s
 		return ImageCommentResult{Handled: true, OK: true}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
 	imageResult, err := generateImageForComment(ctx, prompt, options)
