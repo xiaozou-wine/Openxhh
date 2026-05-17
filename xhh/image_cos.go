@@ -89,13 +89,12 @@ func requestXHHCOSUploadToken(key, mimeType string, size int) (XHHCOSUploadPlan,
 		return XHHCOSUploadPlan{}, "", "", err
 	}
 
-	form := url.Values{}
-	form.Set("bucket", xhhCOSBucket)
-	form.Set("keys", string(keys))
-	form.Set("mimetypes", string(mimetypes))
-	form.Set("is_multipart_upload", "0")
+	formBody := "bucket=" + url.QueryEscape(xhhCOSBucket) +
+		"&keys=" + url.QueryEscape(string(keys)) +
+		"&mimetypes=" + url.QueryEscape(string(mimetypes)) +
+		"&is_multipart_upload=0"
 
-	resp, err := sendXHHCOSUploadTokenReq(strings.NewReader(form.Encode()))
+	resp, err := sendXHHCOSUploadTokenReq(strings.NewReader(formBody))
 	if err != nil {
 		return XHHCOSUploadPlan{}, "", "", err
 	}
@@ -161,9 +160,11 @@ func sendXHHCOSUploadTokenReq(body io.Reader) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
+	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded;charset=UTF-8")
 	req.Header.Set("Origin", "https://www.xiaoheihe.cn")
 	req.Header.Set("Referer", "https://www.xiaoheihe.cn/")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 	req.Header.Set("Host", "api.xiaoheihe.cn")
 	if Info.Cookie != "" {
 		req.Header.Set("cookie", Info.Cookie)
