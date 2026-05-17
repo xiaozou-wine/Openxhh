@@ -10,6 +10,9 @@ import (
 	"strings"
 	"time"
 	"xhhrobot/config"
+	"xhhrobot/loger"
+
+	"go.uber.org/zap"
 )
 
 func UploadToExternalImageHost(imageBytes []byte, sourcePath string, dryRun bool) (XHHCOSUploadPlan, error) {
@@ -31,9 +34,11 @@ func UploadToExternalImageHost(imageBytes []byte, sourcePath string, dryRun bool
 		DryRun:    dryRun,
 	}
 	if dryRun {
+		loger.Loger.Info("[Image]外部图床 dry-run", zap.String("file", plan.UploadURL), zap.String("url", plan.CDNURL), zap.Int("bytes", len(imageBytes)))
 		return plan, nil
 	}
 
+	loger.Loger.Info("[Image]写入外部图床", zap.String("file", plan.UploadURL), zap.String("url", plan.CDNURL), zap.Int("bytes", len(imageBytes)))
 	if err := os.MkdirAll(cfg.ExternalDir, 0755); err != nil {
 		return plan, err
 	}
@@ -41,6 +46,7 @@ func UploadToExternalImageHost(imageBytes []byte, sourcePath string, dryRun bool
 		return plan, err
 	}
 	plan.Uploaded = true
+	loger.Loger.Info("[Image]外部图床写入完成", zap.String("file", plan.UploadURL), zap.String("url", plan.CDNURL))
 	return plan, nil
 }
 

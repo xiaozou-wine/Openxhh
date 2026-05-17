@@ -52,15 +52,19 @@ func ProcessImageGenerationComment(linkID, commentID, rootID, userID int, text s
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
+	started := time.Now()
+	loger.Loger.Info("[XHH]开始处理生图评论", zap.Int("comment_id", commentID), zap.Int("link_id", linkID), zap.Int("userid", userID), zap.String("prompt", prompt), zap.Bool("dry_run", options.DryRun))
 	imageResult, err := generateImageForComment(ctx, prompt, options)
 	if err != nil {
-		return ImageCommentResult{Handled: true, Err: err}
+		return ImageCommentResult{Handled: true, Err: fmt.Errorf("generate image failed: %w", err)}
 	}
+	loger.Loger.Info("[XHH]生图阶段完成", zap.Int("comment_id", commentID), zap.String("path", imageResult.Path), zap.Int("bytes", len(imageResult.Bytes)), zap.Duration("duration", time.Since(started)))
 
 	imageURL, uploadPlan, err := resolveXHHImageURL(ctx, imageResult, options.DryRun)
 	if err != nil {
-		return ImageCommentResult{Handled: true, OK: errors.Is(err, ErrMissingXHHCOSCredential), Err: err}
+		return ImageCommentResult{Handled: true, OK: errors.Is(err, ErrMissingXHHCOSCredential), Err: fmt.Errorf("resolve image url failed: %w", err)}
 	}
+	loger.Loger.Info("[XHH]图片 URL 准备完成", zap.Int("comment_id", commentID), zap.String("image_url", imageURL), zap.String("upload_key", uploadPlan.Key), zap.Bool("uploaded", uploadPlan.Uploaded), zap.Duration("duration", time.Since(started)))
 
 	replyID := strconv.Itoa(commentID)
 	replyRootID := rootID
@@ -76,7 +80,9 @@ func ProcessImageGenerationComment(linkID, commentID, rootID, userID int, text s
 		return ImageCommentResult{Handled: true, OK: true}
 	}
 
+	loger.Loger.Info("[XHH]开始发布带图评论", zap.Int("comment_id", commentID), zap.Int("link_id", linkID), zap.String("reply_id", replyID), zap.String("root_id", rootIDText))
 	if ReplyImage(replyText, strconv.Itoa(linkID), replyID, rootIDText, imageURL) {
+		loger.Loger.Info("[XHH]带图评论发布完成", zap.Int("comment_id", commentID), zap.Duration("duration", time.Since(started)))
 		return ImageCommentResult{Handled: true, OK: true}
 	}
 	return ImageCommentResult{Handled: true, Err: errors.New("comment/create image reply failed")}

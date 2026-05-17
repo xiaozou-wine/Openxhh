@@ -11,11 +11,15 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 	"xhhrobot/config"
+	"xhhrobot/loger"
+
+	"go.uber.org/zap"
 )
 
 type ImageResult struct {
@@ -49,6 +53,8 @@ func HasImageConfig() bool {
 
 func GenerateImage(ctx context.Context, prompt string) (ImageResult, error) {
 	cfg := config.ConfigStruct.Image
+	started := time.Now()
+	loger.Loger.Info("[Image]开始请求生图", zap.String("endpoint", safeURLForLog(cfg.BaseUrl)), zap.String("model", cfg.Model), zap.String("size", cfg.Size), zap.String("response_format", cfg.ResponseFormat))
 	if strings.TrimSpace(cfg.BaseUrl) == "" || strings.TrimSpace(cfg.Model) == "" {
 		return ImageResult{}, errors.New("missing image generation config: image.baseUrl and image.model are required")
 	}
@@ -76,9 +82,10 @@ func GenerateImage(ctx context.Context, prompt string) (ImageResult, error) {
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return ImageResult{}, err
+		return ImageResult{}, fmt.Errorf("image generation http request failed after %s: %w", time.Since(started).Round(time.Second), err)
 	}
 	defer resp.Body.Close()
+	loger.Loger.Info("[Image]生图接口已响应", zap.Int("status", resp.StatusCode), zap.Duration("duration", time.Since(started)))
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -102,11 +109,13 @@ func GenerateImage(ctx context.Context, prompt string) (ImageResult, error) {
 	item := parsed.Data[0]
 	result := ImageResult{URL: item.URL}
 	if item.B64JSON != "" {
+		loger.Loger.Info("[Image]生图返回 base64", zap.Int("base64_len", len(item.B64JSON)))
 		result.Bytes, err = base64.StdEncoding.DecodeString(item.B64JSON)
 		if err != nil {
-			return ImageResult{}, err
+			return ImageResult{}, fmt.Errorf("decode image base64 failed: %w", err)
 		}
 	} else if item.URL != "" {
+		loger.Loger.Info("[Image]生图返回 URL，开始下载", zap.String("image_url", safeURLForLog(item.URL)))
 		result.Bytes, err = downloadImage(ctx, item.URL)
 		if err != nil {
 			return ImageResult{}, err
@@ -117,9 +126,10 @@ func GenerateImage(ctx context.Context, prompt string) (ImageResult, error) {
 
 	path, err := writeGeneratedImage(prompt, result.Bytes, cfg.OutputDir)
 	if err != nil {
-		return ImageResult{}, err
+		return ImageResult{}, fmt.Errorf("write generated image failed: %w", err)
 	}
 	result.Path = path
+	loger.Loger.Info("[Image]生图完成", zap.String("path", path), zap.Int("bytes", len(result.Bytes)), zap.Duration("duration", time.Since(started)))
 	return result, nil
 }
 
@@ -167,6 +177,16 @@ func imageExtension(imageBytes []byte) string {
 	default:
 		return ".png"
 	}
+}
+
+func safeURLForLog(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return "invalid-url"
+	}
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String()
 }
 
 func limitString(s string, max int) string {
