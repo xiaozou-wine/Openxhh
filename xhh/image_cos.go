@@ -150,16 +150,8 @@ func sendXHHCOSUploadTokenReq(body io.Reader) (*http.Response, error) {
 	query.Set("x_client_type", "web")
 	query.Set("x_os_type", "Mac")
 	query.Set("x_request_default", "true")
-	if cfg.WebVer != "" {
-		query.Set("x_client_version", cfg.WebVer)
-	} else {
-		query.Set("x_client_version", "999.999.999")
-	}
-	if cfg.Ver != "" {
-		query.Set("version", cfg.Ver)
-	} else {
-		query.Set("version", "999.0.4")
-	}
+	query.Set("x_client_version", "999.999.999")
+	query.Set("version", "999.0.4")
 	if cfg.DeviceID != "" {
 		query.Set("device_id", cfg.DeviceID)
 	}
