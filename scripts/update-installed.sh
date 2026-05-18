@@ -12,9 +12,11 @@ INSTALL_DIR="${INSTALL_DIR:-/opt/Openxhh}"
 
 SERVICE_NAME="${SERVICE_NAME:-Openxhh}"
 
-WEBUI_SERVICE_NAME="${WEBUI_SERVICE_NAME:-Openxhh-webui-vps}"
+WEBUI_SERVICE_NAME="${WEBUI_SERVICE_NAME:-Openxhh-webui}"
 
-INSTALL_WEBUI_VPS="${INSTALL_WEBUI_VPS:-1}"
+WEBUI_BIN_NAME="${WEBUI_BIN_NAME:-Openxhh-webui}"
+
+INSTALL_WEBUI="${INSTALL_WEBUI:-${INSTALL_WEBUI_VPS:-1}}"
 
 GOPROXY_VALUE="${GOPROXY:-https://goproxy.cn,direct}"
 
@@ -146,9 +148,9 @@ main() {
 
   go build -p "$GO_BUILD_P" -o "$tmp_dir/Openxhh" .
 
-  if [ "$INSTALL_WEBUI_VPS" != "0" ]; then
+  if [ "$INSTALL_WEBUI" != "0" ]; then
 
-    go build -p "$GO_BUILD_P" -o "$tmp_dir/Openxhh-webui-vps" ./cmd/webui-vps
+    go build -p "$GO_BUILD_P" -o "$tmp_dir/$WEBUI_BIN_NAME" ./cmd/webui-vps
 
   fi
 
@@ -166,7 +168,7 @@ main() {
 
   fi
 
-  if [ "$INSTALL_WEBUI_VPS" != "0" ] && systemctl cat "$WEBUI_SERVICE_NAME" >/dev/null 2>&1; then
+  if [ "$INSTALL_WEBUI" != "0" ] && systemctl cat "$WEBUI_SERVICE_NAME" >/dev/null 2>&1; then
 
     webui_service_exists=1
 
@@ -200,11 +202,11 @@ main() {
 
   fi
 
-  if [ "$INSTALL_WEBUI_VPS" != "0" ] && [ -f "$INSTALL_DIR/Openxhh-webui-vps" ]; then
+  if [ "$INSTALL_WEBUI" != "0" ] && [ -f "$INSTALL_DIR/$WEBUI_BIN_NAME" ]; then
 
-    log "备份旧 Web UI 二进制：$INSTALL_DIR/Openxhh-webui-vps.bak-$timestamp"
+    log "备份旧 Web UI 二进制：$INSTALL_DIR/$WEBUI_BIN_NAME.bak-$timestamp"
 
-    cp "$INSTALL_DIR/Openxhh-webui-vps" "$INSTALL_DIR/Openxhh-webui-vps.bak-$timestamp"
+    cp "$INSTALL_DIR/$WEBUI_BIN_NAME" "$INSTALL_DIR/$WEBUI_BIN_NAME.bak-$timestamp"
 
   fi
 
@@ -216,11 +218,11 @@ main() {
 
   chmod +x "$INSTALL_DIR/Openxhh"
 
-  if [ "$INSTALL_WEBUI_VPS" != "0" ]; then
+  if [ "$INSTALL_WEBUI" != "0" ]; then
 
-    cp "$tmp_dir/Openxhh-webui-vps" "$INSTALL_DIR/Openxhh-webui-vps"
+    cp "$tmp_dir/$WEBUI_BIN_NAME" "$INSTALL_DIR/$WEBUI_BIN_NAME"
 
-    chmod +x "$INSTALL_DIR/Openxhh-webui-vps"
+    chmod +x "$INSTALL_DIR/$WEBUI_BIN_NAME"
 
   fi
 
@@ -240,7 +242,7 @@ main() {
 
   fi
 
-  if [ "$INSTALL_WEBUI_VPS" != "0" ]; then
+  if [ "$INSTALL_WEBUI" != "0" ]; then
 
     if [ "$webui_service_exists" -eq 1 ]; then
 
@@ -252,7 +254,7 @@ main() {
 
     else
 
-      log "已更新 Web UI 二进制：$INSTALL_DIR/Openxhh-webui-vps"
+      log "已更新 Web UI 二进制：$INSTALL_DIR/$WEBUI_BIN_NAME"
 
     fi
 
