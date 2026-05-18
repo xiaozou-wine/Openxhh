@@ -9,6 +9,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"net/url"
 	"openxhh/loger"
 	"os"
 	"strconv"
@@ -62,11 +63,12 @@ func Qr() {
 		loger.Loger.Error("[XHH]登录二维码为空")
 		return
 	}
-	qrLoginParts := strings.Split(qrURL, "https://api.xiaoheihe.cn/account/qr_login/?")
-	if len(qrLoginParts) != 2 {
-		loger.Loger.Error("[XHH]登录二维码地址格式异常", zap.String("qr_url", qrURL))
+	qrLoginURL, err := url.Parse(qrURL)
+	if err != nil || qrLoginURL.RawQuery == "" {
+		loger.Loger.Error("[XHH]登录二维码地址格式异常", zap.String("qr_url", qrURL), zap.Error(err))
 		return
 	}
+	qrStateQuery := "?" + qrLoginURL.RawQuery
 	code, err := qrcode.New(qrURL, qrcode.Low)
 	if err != nil {
 		loger.Loger.Error("[XHH]无法生成二维码", zap.Error(err))
@@ -82,7 +84,7 @@ func Qr() {
 	fmt.Println(ascii)
 	for {
 		path := "/account/qr_state/"
-		resp := SendReq("GET", path, nil, fmt.Sprintf("?%v", qrLoginParts[1]))
+		resp := SendReq("GET", path, nil, qrStateQuery)
 		if resp == nil {
 			loger.Loger.Error("[XHH]无法查询扫码状态")
 			return
