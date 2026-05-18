@@ -29,6 +29,7 @@ import (
 
 const defaultAddr = ":29173"
 const journalName = "__journal__"
+const maxConfigBodySize = 1 << 20
 
 var indexTemplate = template.Must(template.New("index").Parse(indexHTML))
 var serviceNamePattern = regexp.MustCompile(`^[A-Za-z0-9_.@-]+$`)
@@ -61,6 +62,50 @@ type logFile struct {
 	Label   string `json:"label"`
 	Size    int64  `json:"size"`
 	ModTime string `json:"modTime"`
+}
+
+type appConfig struct {
+	Xhh struct {
+		CheckTime       int    `json:"checkTime"`
+		ReplyTime       int    `json:"replyTime"`
+		MaxReplyThreads int    `json:"maxReplyThreads"`
+		EnableWhitelist bool   `json:"enableWhitelist"`
+		Owner           string `json:"owner"`
+		DeviceID        string `json:"deviceID"`
+		BaseURL         string `json:"baseUrl"`
+		WebVer          string `json:"webver"`
+		Ver             string `json:"version"`
+	} `json:"xhh"`
+	DataBase struct {
+		Type   string `json:"type"`
+		DB     string `json:"db"`
+		Host   string `json:"host"`
+		Port   string `json:"port"`
+		User   string `json:"user"`
+		Passwd string `json:"passwd"`
+	} `json:"database"`
+	AI struct {
+		Model   string `json:"model"`
+		Prompt  string `json:"prompt"`
+		BaseURL string `json:"baseUrl"`
+		Token   string `json:"token"`
+	} `json:"ai"`
+	Image struct {
+		Model           string `json:"model"`
+		BaseURL         string `json:"baseUrl"`
+		Token           string `json:"token"`
+		Size            string `json:"size"`
+		ResponseFormat  string `json:"responseFormat"`
+		OutputDir       string `json:"outputDir"`
+		UploadMode      string `json:"uploadMode"`
+		ExternalDir     string `json:"externalDir"`
+		ExternalBaseURL string `json:"externalBaseUrl"`
+		PromptRefine    bool   `json:"promptRefine"`
+		PromptModel     string `json:"promptModel"`
+		PromptBaseURL   string `json:"promptBaseUrl"`
+		PromptToken     string `json:"promptToken"`
+		PromptMaxChars  int    `json:"promptMaxChars"`
+	} `json:"image"`
 }
 
 func main() {
@@ -100,6 +145,7 @@ func main() {
 	mux.HandleFunc("/login", state.handleLogin)
 	mux.HandleFunc("/logout", state.requireAuth(state.handleLogout))
 	mux.HandleFunc("/api/status", state.requireAuth(state.handleStatus))
+	mux.HandleFunc("/api/config", state.requireAuth(state.handleConfig))
 	mux.HandleFunc("/api/start", state.requireAuth(state.handleStart))
 	mux.HandleFunc("/api/stop", state.requireAuth(state.handleStop))
 	mux.HandleFunc("/api/restart", state.requireAuth(state.handleRestart))
@@ -325,6 +371,133 @@ func (s *serverState) handleStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *serverState) handleConfig(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		cfg, exists, err := s.loadConfig()
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "exists": exists, "path": s.configPath(), "config": cfg})
+	case http.MethodPost:
+		var cfg appConfig
+		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxConfigBodySize))
+		if err := decoder.Decode(&cfg); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "配置格式错误: " + err.Error()})
+			return
+		}
+		applyConfigDefaults(&cfg)
+		data, err := json.MarshalIndent(cfg, "", "  ")
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		if err := os.MkdirAll(s.rootDir, 0755); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		if err := os.WriteFile(s.configPath(), append(data, '\n'), 0600); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "path": s.configPath()})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *serverState) loadConfig() (appConfig, bool, error) {
+	cfg := defaultConfig()
+	data, err := os.ReadFile(s.configPath())
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return cfg, false, nil
+		}
+		return cfg, false, err
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return cfg, true, err
+	}
+	if applyConfigDefaults(&cfg) {
+		if data, err := json.MarshalIndent(cfg, "", "  "); err == nil {
+			_ = os.WriteFile(s.configPath(), append(data, '\n'), 0600)
+		}
+	}
+	return cfg, true, nil
+}
+
+func (s *serverState) configPath() string {
+	return filepath.Join(s.rootDir, "config.json")
+}
+
+func defaultConfig() appConfig {
+	var cfg appConfig
+	applyConfigDefaults(&cfg)
+	return cfg
+}
+
+func applyConfigDefaults(cfg *appConfig) bool {
+	changed := false
+	if cfg.Xhh.CheckTime == 0 {
+		cfg.Xhh.CheckTime = 60
+		changed = true
+	}
+	if cfg.Xhh.ReplyTime == 0 {
+		cfg.Xhh.ReplyTime = 30
+		changed = true
+	}
+	if cfg.Xhh.MaxReplyThreads <= 0 {
+		cfg.Xhh.MaxReplyThreads = 3
+		changed = true
+	}
+	if cfg.Xhh.BaseURL == "" {
+		cfg.Xhh.BaseURL = "https://api.xiaoheihe.cn"
+		changed = true
+	}
+	if cfg.Xhh.WebVer == "" {
+		cfg.Xhh.WebVer = "2.5"
+		changed = true
+	}
+	if cfg.Xhh.Ver == "" {
+		cfg.Xhh.Ver = "999.0.4"
+		changed = true
+	}
+	if cfg.DataBase.Type == "" {
+		cfg.DataBase.Type = "sqlite"
+		changed = true
+	}
+	if cfg.AI.Prompt == "" {
+		cfg.AI.Prompt = "请根据评论内容自然回复。"
+		changed = true
+	}
+	if cfg.Image.Model == "" {
+		cfg.Image.Model = "gpt-image-2"
+		changed = true
+	}
+	if cfg.Image.Size == "" {
+		cfg.Image.Size = "1024x1024"
+		changed = true
+	}
+	if cfg.Image.ResponseFormat == "" {
+		cfg.Image.ResponseFormat = "b64_json"
+		changed = true
+	}
+	if cfg.Image.OutputDir == "" {
+		cfg.Image.OutputDir = "images"
+		changed = true
+	}
+	if cfg.Image.UploadMode == "" {
+		cfg.Image.UploadMode = "external"
+		changed = true
+	}
+	if cfg.Image.PromptMaxChars == 0 {
+		cfg.Image.PromptMaxChars = 1000
+		changed = true
+	}
+	return changed
+}
+
 func (s *serverState) handleStart(w http.ResponseWriter, r *http.Request) {
 	s.handleSystemctlAction(w, r, "start")
 }
@@ -517,17 +690,17 @@ const indexHTML = `<!doctype html>
     :root{color-scheme:light;--bg:#f2f5f9;--paper:#fff;--ink:#111827;--muted:#667085;--line:#e5eaf2;--dark:#111820;--green:#08b99e;--blue:#1684e2;--amber:#ffc45c;--red:#de3038;--violet:#6657ff;--shadow:0 16px 42px rgba(36,50,74,.12);--soft:0 8px 22px rgba(36,50,74,.08)}
     *{box-sizing:border-box}body{margin:0;min-height:100vh;font-family:"Microsoft YaHei UI","Microsoft YaHei",ui-sans-serif,system-ui,sans-serif;color:var(--ink);background:radial-gradient(circle at 12% -8%,rgba(255,197,213,.32),transparent 26rem),radial-gradient(circle at 88% -4%,rgba(22,132,226,.12),transparent 30rem),linear-gradient(180deg,#f8fafc 0%,var(--bg) 100%)}
     body:before{content:"";position:fixed;inset:0;pointer-events:none;background-image:linear-gradient(90deg,rgba(255,255,255,.55) 1px,transparent 1px),linear-gradient(rgba(255,255,255,.55) 1px,transparent 1px);background-size:30px 30px;mask-image:linear-gradient(to bottom,rgba(0,0,0,.28),transparent 58%)}
-    button,input,select{font:inherit}.hidden{display:none!important}.shell{position:relative;width:min(1420px,calc(100vw - 56px));margin:0 auto;padding:18px 0 48px}.topnav{height:64px;display:flex;align-items:center;justify-content:space-between;gap:18px;padding:0 16px 0 20px;border:1px solid #dfe6ef;border-radius:28px;background:rgba(255,255,255,.84);box-shadow:var(--soft);backdrop-filter:blur(16px);position:sticky;top:14px;z-index:5}.brand{display:flex;align-items:center;gap:12px;min-width:220px}.logo{width:38px;height:38px;border-radius:14px;background:linear-gradient(145deg,#fff1f6,#ffd7e5);box-shadow:inset 0 -8px 18px rgba(255,135,174,.2);display:grid;place-items:center;color:#d45d88;font-weight:900}.brand strong{font-size:18px}.brand small{color:var(--muted);font-size:12px}.navlinks{display:flex;align-items:center;gap:8px;flex:1;justify-content:center}.navlinks button{border:0;background:transparent;color:#4b5563;border-radius:999px;padding:10px 16px;cursor:pointer;font-weight:800}.navlinks button.active{background:#eef3f8;color:#111827;box-shadow:inset 0 0 0 1px #e3eaf3}.right-tools{display:flex;align-items:center;gap:10px}.tool-pill{display:inline-flex;align-items:center;gap:8px;border:1px solid #dfe6ef;border-radius:999px;background:#fff;padding:9px 13px;color:#475467;font-weight:800}.avatar-button{width:42px;height:42px;border:3px solid #fff;border-radius:50%;padding:0;background:#fff;box-shadow:0 8px 20px rgba(36,50,74,.16);overflow:hidden;cursor:pointer}.avatar-button.active{outline:4px solid rgba(22,132,226,.14)}.avatar-button img{width:100%;height:100%;object-fit:cover;display:block}.dot{width:9px;height:9px;border-radius:50%;background:var(--red);box-shadow:0 0 0 5px rgba(222,48,56,.12)}.dot.on{background:var(--green);box-shadow:0 0 0 5px rgba(8,185,158,.13)}
-    .login{min-height:72vh;display:grid;place-items:center}.login-card{width:min(470px,100%);padding:36px;border-radius:28px;background:var(--paper);box-shadow:var(--shadow);text-align:center}.catgirl{position:relative;width:126px;height:126px;margin:0 auto 18px;border-radius:40px;background:linear-gradient(145deg,#fff8fb,#ffe4ef 48%,#fff);box-shadow:inset 0 -12px 30px rgba(255,156,183,.22),var(--soft);display:grid;place-items:center;color:#d35d88;font-size:28px;font-weight:900}.catgirl:before,.catgirl:after{content:"";position:absolute;top:-12px;width:46px;height:46px;background:#ffe3ee;border:7px solid #fff;border-radius:14px;transform:rotate(45deg);box-shadow:var(--soft)}.catgirl:before{left:14px}.catgirl:after{right:14px}.catgirl b{position:relative;z-index:1}.login-card h1{margin:0 0 8px;font-size:30px}.login-card p{margin:0 0 22px;color:var(--muted);line-height:1.7}.input,select{width:100%;border:1px solid var(--line);background:#fbfcfe;color:var(--ink);border-radius:16px;padding:14px 15px;outline:none}.input:focus,select:focus{border-color:rgba(22,132,226,.55);box-shadow:0 0 0 4px rgba(22,132,226,.09)}.toast{min-height:22px;margin-top:14px;color:var(--red);font-size:13px}
-    .layout{display:grid;grid-template-columns:260px 1fr;gap:26px;margin-top:24px}.side{padding:18px}.new-chat{width:100%;height:46px;border:0;border-radius:22px;background:var(--dark);color:#fff;font-weight:900;cursor:pointer;box-shadow:var(--soft)}.side-card{margin-top:14px;padding:16px;border-radius:18px;background:#fff;box-shadow:var(--soft)}.side-card strong{display:block;margin-bottom:8px}.side-card p{margin:0;color:var(--muted);font-size:13px;line-height:1.5}.content{min-width:0}.view{display:none}.view.active{display:block}.hero-card{padding:24px 26px;border-radius:26px;background:#fff;box-shadow:var(--shadow)}.hero-head{display:flex;align-items:center;justify-content:space-between;gap:16px}.hero-title h1{margin:0;font-size:28px}.hero-title p{margin:7px 0 0;color:var(--muted)}.panel-actions{display:flex;gap:10px;flex-wrap:wrap}button.primary,button.secondary,button.danger,button.warn{border:0;cursor:pointer;border-radius:14px;padding:12px 17px;font-weight:900;transition:.18s ease}button.primary{color:#fff;background:var(--blue);box-shadow:0 8px 18px rgba(22,132,226,.2)}button.secondary{color:#2563eb;background:#edf6ff}button.danger{color:#fff;background:var(--red);box-shadow:0 8px 18px rgba(222,48,56,.18)}button.warn{color:#5a3a00;background:var(--amber);box-shadow:0 8px 18px rgba(255,196,92,.22)}button:hover{transform:translateY(-1px);filter:brightness(1.03)}button:disabled{opacity:.45;cursor:not-allowed;transform:none}.cards{display:grid;grid-template-columns:repeat(5,minmax(138px,1fr));gap:20px;margin-top:24px}.card{background:#fff;border-radius:22px;box-shadow:var(--shadow);border:1px solid rgba(255,255,255,.8)}.stat{min-height:124px;min-width:0;padding:20px;text-align:center;display:grid;align-content:center;gap:12px;overflow:hidden}.stat span{color:#4c5566;font-size:16px}.stat strong{max-width:100%;font-size:clamp(30px,3vw,42px);line-height:1;font-weight:900;letter-spacing:-.05em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.green{color:var(--green)}.blue{color:var(--blue)}.red{color:var(--red)}.amber{color:#f7b23c}.violet{color:var(--violet)}.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-top:24px}.panel{padding:24px}.panel-head{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:18px}.panel h2{margin:0;font-size:22px}.panel p{margin:6px 0 0;color:var(--muted)}.control-grid{display:grid;grid-template-columns:150px 1fr;gap:20px;align-items:center}.meta{display:grid;gap:12px}.meta div{display:grid;gap:4px}.meta span{font-size:12px;color:var(--muted)}.meta strong{font-size:13px;word-break:break-all;white-space:pre-wrap}.status-text{max-height:130px;overflow:auto}.warnbox{border:1px solid #ffe0a3;background:#fff8e8;color:#7a4f00;border-radius:14px;padding:12px 14px;margin-top:16px;font-size:13px;line-height:1.55}.chart{height:220px;border-top:1px solid var(--line);display:grid;grid-template-columns:repeat(7,1fr);align-items:end;gap:18px;padding:24px 12px 4px}.bar-wrap{text-align:center;color:var(--muted);font-size:13px}.bar-num{height:22px;color:#4c5566}.bar{width:58px;max-width:100%;height:8px;margin:6px auto 10px;border-radius:8px 8px 2px 2px;background:linear-gradient(180deg,var(--green),#10c6aa);box-shadow:0 8px 18px rgba(8,185,158,.2)}.records{margin-top:24px;padding:24px}.table-wrap{overflow:auto;border-top:1px solid var(--line);padding-top:18px}table{width:100%;border-collapse:collapse;min-width:900px;table-layout:fixed}th{background:#f6f8fb;color:#4c5566;text-align:left;font-size:15px;padding:14px 12px}th:nth-child(1){width:160px}th:nth-child(2){width:170px}th:nth-child(5){width:92px}td{padding:14px 12px;border-bottom:1px solid var(--line);font-size:14px;vertical-align:top}.badge{display:inline-flex;align-items:center;justify-content:center;min-width:64px;padding:6px 10px;border-radius:999px;font-size:12px;font-weight:900;color:#fff}.badge.info{background:var(--blue)}.badge.error{background:var(--red)}.badge.warn{background:#f0a81f}.badge.ok{background:var(--green)}.copy-btn{border:0;border-radius:999px;padding:6px 10px;background:#edf6ff;color:#2563eb;font-size:12px;font-weight:900;cursor:pointer;margin-left:8px}.content-cell{line-height:1.55;user-select:text}.clip-cell{max-height:5.1em;overflow:auto;overflow-wrap:anywhere;word-break:break-word;padding-right:4px}.clip-cell::-webkit-scrollbar{width:6px}.clip-cell::-webkit-scrollbar-thumb{background:#d5dce8;border-radius:999px}.log-panel{overflow:hidden}.log-head{display:flex;justify-content:space-between;align-items:center;gap:16px;padding:22px 24px;border-bottom:1px solid var(--line)}.log-actions{display:flex;align-items:center;justify-content:flex-end;gap:10px;min-width:460px;flex-wrap:wrap}.log-actions select{width:auto;min-width:220px}.log-actions .copy-btn{margin-left:0;white-space:nowrap}.terminal{height:min(56vh,590px);overflow:auto;background:#101724;color:#d9e7ff;padding:20px 24px;border-radius:0 0 22px 22px;user-select:text;cursor:text}pre{margin:0;white-space:pre-wrap;word-break:break-word;font:13px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;user-select:text;cursor:text}.log-line{display:block;min-height:1.55em;padding:1px 4px;border-radius:6px;cursor:pointer}.log-line:hover{background:rgba(255,255,255,.08)}.log-line.selected{background:rgba(22,132,226,.22);color:#fff}.log-line.copied{background:rgba(8,185,158,.18);color:#fff}.empty{color:var(--muted);display:grid;place-items:center;text-align:center;min-height:230px;background:#fff}.settings-hero{display:grid;grid-template-columns:120px 1fr;gap:22px;align-items:center;padding:26px;border-radius:24px;background:linear-gradient(135deg,#fff7fb,#eef6ff);border:1px solid #fff;box-shadow:var(--soft)}.settings-hero h2{margin:0 0 8px;font-size:28px}.settings-hero p{margin:0;color:var(--muted);line-height:1.65}.settings-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:16px;margin-top:18px}.setting{position:relative;overflow:hidden;padding:20px;border:1px solid var(--line);border-radius:20px;background:#fbfcfe}.setting:before{content:"";position:absolute;inset:0 0 auto;height:4px;background:linear-gradient(90deg,var(--blue),#ff91b8)}.setting span{display:block;color:var(--muted);font-size:13px;margin-bottom:9px}.setting strong{display:block;font-size:17px;line-height:1.45;word-break:break-all}.setting small{display:block;margin-top:8px;color:var(--muted);line-height:1.5}.setting-wide{grid-column:1/-1}.setting-actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}.token-summary{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.token-summary div{padding:18px;border:1px solid var(--line);border-radius:18px;background:#fbfcfe}.token-summary span{display:block;color:var(--muted);font-size:13px;margin-bottom:8px}.token-summary strong{font-size:32px}.mobile-tabs{display:none}
-    @media(max-width:1180px){.cards{grid-template-columns:repeat(2,1fr)}.grid-2{grid-template-columns:1fr}.layout{grid-template-columns:1fr}.side{display:none}.navlinks{display:none}.mobile-tabs{display:block;margin-top:18px}.mobile-tabs select{background:#fff}.topnav{position:relative;top:0}.brand{min-width:0}.right-tools .tool-pill:first-child{display:none}}@media(max-width:700px){.shell{width:min(100vw - 24px,1420px);padding-top:12px}.topnav{border-radius:20px}.cards{grid-template-columns:1fr}.hero-head,.panel-head,.log-head{align-items:stretch;flex-direction:column}.control-grid,.settings-hero,.settings-grid,.token-summary{grid-template-columns:1fr}.content-cell{white-space:normal}.chart{gap:10px;padding-inline:4px}.bar{width:34px}.stat strong{font-size:36px}}
+    button,input,select,textarea{font:inherit}.hidden{display:none!important}.shell{position:relative;width:min(1420px,calc(100vw - 56px));margin:0 auto;padding:18px 0 48px}.topnav{height:64px;display:flex;align-items:center;justify-content:space-between;gap:18px;padding:0 16px 0 20px;border:1px solid #dfe6ef;border-radius:28px;background:rgba(255,255,255,.84);box-shadow:var(--soft);backdrop-filter:blur(16px);position:sticky;top:14px;z-index:5}.brand{display:flex;align-items:center;gap:12px;min-width:220px}.logo{width:38px;height:38px;border-radius:14px;background:linear-gradient(145deg,#fff1f6,#ffd7e5);box-shadow:inset 0 -8px 18px rgba(255,135,174,.2);display:grid;place-items:center;color:#d45d88;font-weight:900}.brand strong{font-size:18px}.brand small{color:var(--muted);font-size:12px}.navlinks{display:flex;align-items:center;gap:8px;flex:1;justify-content:center}.navlinks button{border:0;background:transparent;color:#4b5563;border-radius:999px;padding:10px 16px;cursor:pointer;font-weight:800}.navlinks button.active{background:#eef3f8;color:#111827;box-shadow:inset 0 0 0 1px #e3eaf3}.right-tools{display:flex;align-items:center;gap:10px}.tool-pill{display:inline-flex;align-items:center;gap:8px;border:1px solid #dfe6ef;border-radius:999px;background:#fff;padding:9px 13px;color:#475467;font-weight:800}.avatar-button{width:42px;height:42px;border:3px solid #fff;border-radius:50%;padding:0;background:#fff;box-shadow:0 8px 20px rgba(36,50,74,.16);overflow:hidden;cursor:pointer}.avatar-button.active{outline:4px solid rgba(22,132,226,.14)}.avatar-button img{width:100%;height:100%;object-fit:cover;display:block}.dot{width:9px;height:9px;border-radius:50%;background:var(--red);box-shadow:0 0 0 5px rgba(222,48,56,.12)}.dot.on{background:var(--green);box-shadow:0 0 0 5px rgba(8,185,158,.13)}
+    .login{min-height:72vh;display:grid;place-items:center}.login-card{width:min(470px,100%);padding:36px;border-radius:28px;background:var(--paper);box-shadow:var(--shadow);text-align:center}.catgirl{position:relative;width:126px;height:126px;margin:0 auto 18px;border-radius:40px;background:linear-gradient(145deg,#fff8fb,#ffe4ef 48%,#fff);box-shadow:inset 0 -12px 30px rgba(255,156,183,.22),var(--soft);display:grid;place-items:center;color:#d35d88;font-size:28px;font-weight:900}.catgirl:before,.catgirl:after{content:"";position:absolute;top:-12px;width:46px;height:46px;background:#ffe3ee;border:7px solid #fff;border-radius:14px;transform:rotate(45deg);box-shadow:var(--soft)}.catgirl:before{left:14px}.catgirl:after{right:14px}.catgirl b{position:relative;z-index:1}.login-card h1{margin:0 0 8px;font-size:30px}.login-card p{margin:0 0 22px;color:var(--muted);line-height:1.7}.input,select,textarea{width:100%;border:1px solid var(--line);background:#fbfcfe;color:var(--ink);border-radius:16px;padding:14px 15px;outline:none}textarea{min-height:110px;resize:vertical}.input:focus,select:focus,textarea:focus{border-color:rgba(22,132,226,.55);box-shadow:0 0 0 4px rgba(22,132,226,.09)}.toast{min-height:22px;margin-top:14px;color:var(--red);font-size:13px}
+    .layout{display:grid;grid-template-columns:260px 1fr;gap:26px;margin-top:24px}.side{padding:18px}.new-chat{width:100%;height:46px;border:0;border-radius:22px;background:var(--dark);color:#fff;font-weight:900;cursor:pointer;box-shadow:var(--soft)}.side-card{margin-top:14px;padding:16px;border-radius:18px;background:#fff;box-shadow:var(--soft)}.side-card strong{display:block;margin-bottom:8px}.side-card p{margin:0;color:var(--muted);font-size:13px;line-height:1.5}.content{min-width:0}.view{display:none}.view.active{display:block}.hero-card{padding:24px 26px;border-radius:26px;background:#fff;box-shadow:var(--shadow)}.hero-head{display:flex;align-items:center;justify-content:space-between;gap:16px}.hero-title h1{margin:0;font-size:28px}.hero-title p{margin:7px 0 0;color:var(--muted)}.panel-actions{display:flex;gap:10px;flex-wrap:wrap}button.primary,button.secondary,button.danger,button.warn{border:0;cursor:pointer;border-radius:14px;padding:12px 17px;font-weight:900;transition:.18s ease}button.primary{color:#fff;background:var(--blue);box-shadow:0 8px 18px rgba(22,132,226,.2)}button.secondary{color:#2563eb;background:#edf6ff}button.danger{color:#fff;background:var(--red);box-shadow:0 8px 18px rgba(222,48,56,.18)}button.warn{color:#5a3a00;background:var(--amber);box-shadow:0 8px 18px rgba(255,196,92,.22)}button:hover{transform:translateY(-1px);filter:brightness(1.03)}button:disabled{opacity:.45;cursor:not-allowed;transform:none}.cards{display:grid;grid-template-columns:repeat(5,minmax(138px,1fr));gap:20px;margin-top:24px}.card{background:#fff;border-radius:22px;box-shadow:var(--shadow);border:1px solid rgba(255,255,255,.8)}.stat{min-height:124px;min-width:0;padding:20px;text-align:center;display:grid;align-content:center;gap:12px;overflow:hidden}.stat span{color:#4c5566;font-size:16px}.stat strong{max-width:100%;font-size:clamp(30px,3vw,42px);line-height:1;font-weight:900;letter-spacing:-.05em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.green{color:var(--green)}.blue{color:var(--blue)}.red{color:var(--red)}.amber{color:#f7b23c}.violet{color:var(--violet)}.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-top:24px}.panel{padding:24px}.panel-head{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:18px}.panel h2{margin:0;font-size:22px}.panel p{margin:6px 0 0;color:var(--muted)}.control-grid{display:grid;grid-template-columns:150px 1fr;gap:20px;align-items:center}.meta{display:grid;gap:12px}.meta div{display:grid;gap:4px}.meta span{font-size:12px;color:var(--muted)}.meta strong{font-size:13px;word-break:break-all;white-space:pre-wrap}.status-text{max-height:130px;overflow:auto}.warnbox{border:1px solid #ffe0a3;background:#fff8e8;color:#7a4f00;border-radius:14px;padding:12px 14px;margin-top:16px;font-size:13px;line-height:1.55}.chart{height:220px;border-top:1px solid var(--line);display:grid;grid-template-columns:repeat(7,1fr);align-items:end;gap:18px;padding:24px 12px 4px}.bar-wrap{text-align:center;color:var(--muted);font-size:13px}.bar-num{height:22px;color:#4c5566}.bar{width:58px;max-width:100%;height:8px;margin:6px auto 10px;border-radius:8px 8px 2px 2px;background:linear-gradient(180deg,var(--green),#10c6aa);box-shadow:0 8px 18px rgba(8,185,158,.2)}.records{margin-top:24px;padding:24px}.table-wrap{overflow:auto;border-top:1px solid var(--line);padding-top:18px}table{width:100%;border-collapse:collapse;min-width:900px;table-layout:fixed}th{background:#f6f8fb;color:#4c5566;text-align:left;font-size:15px;padding:14px 12px}th:nth-child(1){width:160px}th:nth-child(2){width:170px}th:nth-child(5){width:92px}td{padding:14px 12px;border-bottom:1px solid var(--line);font-size:14px;vertical-align:top}.badge{display:inline-flex;align-items:center;justify-content:center;min-width:64px;padding:6px 10px;border-radius:999px;font-size:12px;font-weight:900;color:#fff}.badge.info{background:var(--blue)}.badge.error{background:var(--red)}.badge.warn{background:#f0a81f}.badge.ok{background:var(--green)}.copy-btn{border:0;border-radius:999px;padding:6px 10px;background:#edf6ff;color:#2563eb;font-size:12px;font-weight:900;cursor:pointer;margin-left:8px}.content-cell{line-height:1.55;user-select:text}.clip-cell{max-height:5.1em;overflow:auto;overflow-wrap:anywhere;word-break:break-word;padding-right:4px}.clip-cell::-webkit-scrollbar{width:6px}.clip-cell::-webkit-scrollbar-thumb{background:#d5dce8;border-radius:999px}.log-panel{overflow:hidden}.log-head{display:grid;grid-template-columns:minmax(220px,1fr) minmax(520px,1.7fr);align-items:start;gap:18px;padding:22px 24px;border-bottom:1px solid var(--line)}.log-tools{display:grid;gap:10px}.log-filterbar,.log-buttonbar{display:flex;align-items:center;justify-content:flex-end;gap:10px;flex-wrap:wrap}.log-filterbar select{width:auto;min-width:150px}.log-filterbar input{width:min(260px,100%);padding:10px 12px}.log-buttonbar .copy-btn{margin-left:0;white-space:nowrap}.terminal{height:min(56vh,590px);overflow:auto;background:#101724;color:#d9e7ff;padding:20px 24px;border-radius:0 0 22px 22px;user-select:text;cursor:text}pre{margin:0;white-space:pre-wrap;word-break:break-word;font:13px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;user-select:text;cursor:text}.log-line{display:block;min-height:1.55em;padding:1px 4px;border-radius:6px;cursor:pointer}.log-line:hover{background:rgba(255,255,255,.08)}.log-line.selected{background:rgba(22,132,226,.22);color:#fff}.log-line.copied{background:rgba(8,185,158,.18);color:#fff}.empty{color:var(--muted);display:grid;place-items:center;text-align:center;min-height:230px;background:#fff}.settings-hero{display:grid;grid-template-columns:120px 1fr;gap:22px;align-items:center;padding:26px;border-radius:24px;background:linear-gradient(135deg,#fff7fb,#eef6ff);border:1px solid #fff;box-shadow:var(--soft)}.settings-hero h2{margin:0 0 8px;font-size:28px}.settings-hero p{margin:0;color:var(--muted);line-height:1.65}.config-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.config-group{grid-column:1/-1;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;padding:18px;border:1px solid var(--line);border-radius:22px;background:linear-gradient(180deg,#fff,#fbfcfe)}.config-group h3{grid-column:1/-1;margin:0 0 2px;color:var(--blue);font-size:16px;display:flex;align-items:center;gap:8px}.config-group h3:before{content:"";width:8px;height:8px;border-radius:50%;background:var(--blue);box-shadow:0 0 0 5px rgba(22,132,226,.1)}.field{display:grid;gap:7px}.field label{font-size:12px;color:var(--muted)}.field.wide{grid-column:1/-1}.switch{display:flex;align-items:center;justify-content:space-between;gap:12px;border:1px solid var(--line);border-radius:16px;padding:13px;background:#fbfcfe}.switch input{width:22px;height:22px}.settings-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:16px;margin-top:18px}.setting{position:relative;overflow:hidden;padding:20px;border:1px solid var(--line);border-radius:20px;background:#fbfcfe}.setting:before{content:"";position:absolute;inset:0 0 auto;height:4px;background:linear-gradient(90deg,var(--blue),#ff91b8)}.setting span{display:block;color:var(--muted);font-size:13px;margin-bottom:9px}.setting strong{display:block;font-size:17px;line-height:1.45;word-break:break-all}.setting small{display:block;margin-top:8px;color:var(--muted);line-height:1.5}.setting-wide{grid-column:1/-1}.setting-actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}.token-summary{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.token-summary div{padding:18px;border:1px solid var(--line);border-radius:18px;background:#fbfcfe}.token-summary span{display:block;color:var(--muted);font-size:13px;margin-bottom:8px}.token-summary strong{font-size:32px}.mobile-tabs{display:none}
+    @media(max-width:1180px){.cards{grid-template-columns:repeat(2,1fr)}.grid-2{grid-template-columns:1fr}.layout{grid-template-columns:1fr}.side{display:none}.navlinks{display:none}.mobile-tabs{display:block;margin-top:18px}.mobile-tabs select{background:#fff}.topnav{position:relative;top:0}.brand{min-width:0}.right-tools .tool-pill:first-child{display:none}}@media(max-width:700px){.shell{width:min(100vw - 24px,1420px);padding-top:12px}.topnav{border-radius:20px}.cards{grid-template-columns:1fr}.hero-head,.panel-head{align-items:stretch;flex-direction:column}.log-head{grid-template-columns:1fr}.log-filterbar,.log-buttonbar{justify-content:stretch}.log-filterbar select,.log-filterbar input,.log-buttonbar button{width:100%}.control-grid,.settings-hero,.settings-grid,.token-summary,.config-form,.config-group{grid-template-columns:1fr}.content-cell{white-space:normal}.chart{gap:10px;padding-inline:4px}.bar{width:34px}.stat strong{font-size:36px}}
   </style>
 </head>
 <body data-authed="{{.Authed}}">
   <main class="shell">
     <header class="topnav">
       <div class="brand"><div class="logo">猫</div><div><strong>小黑盒猫娘</strong><br><small>VPS 控制台</small></div></div>
-      <nav class="navlinks"><button class="nav active" data-view="home">主控台</button><button class="nav" data-view="logs">日志管理</button><button class="nav" data-view="service">服务控制</button><button class="nav" data-view="status">系统状态</button></nav>
+      <nav class="navlinks"><button class="nav active" data-view="home">主控台</button><button class="nav" data-view="logs">日志管理</button><button class="nav" data-view="config">配置管理</button><button class="nav" data-view="service">服务控制</button><button class="nav" data-view="status">系统状态</button></nav>
       <div class="right-tools"><div id="topStatus" class="tool-pill"><span class="dot"></span><span>未连接</span></div><button id="adminMenuBtn" class="avatar-button" type="button" aria-label="打开管理员设置"><img src="/assets/admin-avatar.png" alt="管理员"></button></div>
     </header>
 
@@ -543,7 +716,7 @@ const indexHTML = `<!doctype html>
     </section>
 
     <section id="appView" class="hidden">
-      <div class="mobile-tabs"><select id="mobileNav"><option value="home">主控台</option><option value="logs">日志管理</option><option value="service">服务控制</option><option value="status">系统状态</option></select></div>
+      <div class="mobile-tabs"><select id="mobileNav"><option value="home">主控台</option><option value="logs">日志管理</option><option value="config">配置管理</option><option value="service">服务控制</option><option value="status">系统状态</option></select></div>
       <div class="layout">
         <aside class="side">
           <button class="new-chat" data-view-button="home">主控首页</button>
@@ -558,13 +731,15 @@ const indexHTML = `<!doctype html>
             <section class="card records"><div class="panel-head"><div><h2>最近 20 次对话</h2><p>按顺序配对“小黑盒用户提问”和“机器人回复”，失败会单独标记。</p></div></div><div class="table-wrap"><table><thead><tr><th>时间</th><th>用户</th><th>用户说</th><th>机器人回复</th><th>状态</th></tr></thead><tbody id="recordsBody"><tr><td colspan="5">等待日志...</td></tr></tbody></table></div></section>
           </section>
 
-          <section class="view" id="view-logs"><div class="card log-panel"><div class="log-head"><div><h2>日志管理</h2><p id="currentSource">等待日志源...</p></div><div class="log-actions"><select id="logSelect"></select><button id="copySelectedLogBtn" class="copy-btn" type="button">复制选中</button><button id="copyLogBtn" class="copy-btn" type="button">复制全部</button><button id="toggleLogRefreshBtn" class="copy-btn" type="button">暂停刷新</button></div></div><div class="terminal"><pre id="logOutput" class="empty" tabindex="0">等待日志...</pre></div></div></section>
+          <section class="view" id="view-logs"><div class="card log-panel"><div class="log-head"><div><h2>日志管理</h2><p id="currentSource">等待日志源...</p></div><div class="log-tools"><div class="log-filterbar"><select id="logSelect"></select><select id="logFilter"><option value="all">全部</option><option value="error">只看报错</option><option value="ask">用户提问</option><option value="reply">AI 回复</option><option value="image">图片/生图</option></select><input id="logKeyword" class="input" type="search" placeholder="关键词筛选"></div><div class="log-buttonbar"><button id="copySelectedLogBtn" class="copy-btn" type="button">复制选中</button><button id="copyLogBtn" class="copy-btn" type="button">复制全部</button><button id="toggleLogRefreshBtn" class="copy-btn" type="button">暂停刷新</button></div></div></div><div class="terminal"><pre id="logOutput" class="empty" tabindex="0">等待日志...</pre></div></div></section>
 
           <section class="view" id="view-service"><div class="card panel"><div class="panel-head"><div><h2>服务控制</h2><p>启动、停止或重启 Openxhh systemd 服务。</p></div></div><div class="panel-actions"><button id="serviceStartBtn" class="primary">启动服务</button><button id="serviceRestartBtn" class="warn">重启服务</button><button id="serviceStopBtn" class="danger">停止服务</button><button id="serviceRefreshBtn" class="secondary">刷新状态</button></div><div class="warnbox">如果按钮报错，请确认 Web UI 运行用户有权限执行 systemctl。</div></div></section>
 
+          <section class="view" id="view-config"><div class="card panel"><div class="panel-head"><div><h2>配置管理</h2><p>保存后写入工作目录下的 <strong id="configPath">config.json</strong>；运行中的机器人需要重启后读取新配置。</p></div><button id="saveConfigBtn" class="primary" type="submit" form="configForm">保存配置</button></div><form id="configForm" class="config-form"><div class="config-group"><h3>小黑盒</h3><div class="field"><label>检查间隔/秒</label><input class="input" data-path="xhh.checkTime" data-type="number"></div><div class="field"><label>回复间隔/秒</label><input class="input" data-path="xhh.replyTime" data-type="number"></div><div class="field"><label>最高回复线程</label><input class="input" data-path="xhh.maxReplyThreads" data-type="number"></div><label class="switch field wide"><span>启用白名单（关闭时回复所有 @，仍识别 owner）</span><input data-path="xhh.enableWhitelist" data-type="bool" type="checkbox"></label><div class="field wide"><label>Owner / 白名单 UID（英文逗号分隔）</label><input class="input" data-path="xhh.owner"></div><div class="field"><label>Device ID</label><input class="input" data-path="xhh.deviceID"></div><div class="field wide"><label>API Base URL</label><input class="input" data-path="xhh.baseUrl"></div><div class="field"><label>Web Version</label><input class="input" data-path="xhh.webver"></div><div class="field"><label>Version</label><input class="input" data-path="xhh.version"></div></div><div class="config-group"><h3>数据库</h3><div class="field"><label>类型</label><select data-path="database.type"><option value="sqlite">sqlite</option><option value="pg">pg</option></select></div><div class="field"><label>数据库名</label><input class="input" data-path="database.db"></div><div class="field"><label>Host</label><input class="input" data-path="database.host"></div><div class="field"><label>Port</label><input class="input" data-path="database.port"></div><div class="field"><label>User</label><input class="input" data-path="database.user"></div><div class="field"><label>Password</label><input class="input" data-path="database.passwd" type="password"></div></div><div class="config-group"><h3>AI 回复</h3><div class="field"><label>模型</label><input class="input" data-path="ai.model"></div><div class="field wide"><label>Chat Completions URL</label><input class="input" data-path="ai.baseUrl"></div><div class="field wide"><label>Token</label><input class="input" data-path="ai.token" type="password"></div><div class="field wide"><label>回复策略 Prompt</label><textarea data-path="ai.prompt"></textarea></div></div><div class="config-group"><h3>图片能力</h3><div class="field"><label>模型</label><input class="input" data-path="image.model"></div><div class="field"><label>尺寸</label><input class="input" data-path="image.size"></div><div class="field wide"><label>Images Generations URL</label><input class="input" data-path="image.baseUrl"></div><div class="field wide"><label>图片 Token</label><input class="input" data-path="image.token" type="password"></div><div class="field"><label>输出格式</label><input class="input" data-path="image.responseFormat"></div><div class="field"><label>输出目录</label><input class="input" data-path="image.outputDir"></div><div class="field"><label>上传模式</label><input class="input" data-path="image.uploadMode"></div><div class="field"><label>外部图片目录</label><input class="input" data-path="image.externalDir"></div><div class="field wide"><label>外部图片访问 URL</label><input class="input" data-path="image.externalBaseUrl"></div><label class="switch field wide"><span>启用图片 Prompt 优化</span><input data-path="image.promptRefine" data-type="bool" type="checkbox"></label><div class="field"><label>Prompt 优化模型</label><input class="input" data-path="image.promptModel"></div><div class="field"><label>Prompt 最大字符数</label><input class="input" data-path="image.promptMaxChars" data-type="number"></div><div class="field wide"><label>Prompt 优化 URL</label><input class="input" data-path="image.promptBaseUrl"></div><div class="field wide"><label>Prompt 优化 Token</label><input class="input" data-path="image.promptToken" type="password"></div></div></form><div id="configToast" class="toast"></div><div class="warnbox">保存配置不会自动重启服务；改白名单、线程数、模型或 token 后，请到“服务控制”重启 Openxhh。</div></div></section>
+
           <section class="view" id="view-status"><div class="card panel"><div class="panel-head"><div><h2>系统状态</h2><p>当前 Web UI 与 Openxhh 服务信息。</p></div></div><div class="meta"><div><span>监听地址</span><strong id="listenAddr">—</strong></div><div><span>工作目录</span><strong id="rootDir">—</strong></div><div><span>systemctl status</span><strong id="statusText" class="status-text">—</strong></div></div></div></section>
 
-          <section class="view" id="view-settings"><div class="card panel"><div class="settings-hero"><button class="avatar-button" type="button" aria-label="管理员头像"><img src="/assets/admin-avatar.png" alt="管理员"></button><div><h2>管理员设置</h2><p>这里集中展示 Web UI 的公开访问、认证和运行配置。敏感文件仍保持只读，不在公网面板直接编辑。</p></div></div><div class="settings-grid"><div class="setting"><span>systemd 服务</span><strong>{{.Service}}</strong><small>主控台按钮会对这个服务执行 start / stop / restart。</small></div><div class="setting"><span>Web UI 端口</span><strong>29173</strong><small>默认公网监听；建议只在云安全组放行你的固定 IP。</small></div><div class="setting"><span>认证方式</span><strong>随机强密码</strong><small>首次启动打印密码，本地仅保存 salted hash。</small></div><div class="setting"><span>失败限速</span><strong>5 次失败锁定 5 分钟</strong><small>降低公网暴力尝试风险。</small></div><div class="setting setting-wide"><span>安全建议</span><strong>公网访问建议配合 HTTPS 反代或安全组白名单</strong><small>如果只是自己使用，优先只开放可信来源 IP；不要把 webui_auth.json、config.json、cookie.json 上传到公开仓库。</small></div></div><div class="setting-actions"><button id="settingsHomeBtn" class="secondary" type="button">返回主控台</button><button id="logoutBtn" class="danger" type="button">退出登录</button></div></div></section>
+          <section class="view" id="view-settings"><div class="card panel"><div class="settings-hero"><button class="avatar-button" type="button" aria-label="管理员头像"><img src="/assets/admin-avatar.png" alt="管理员"></button><div><h2>管理员设置</h2><p>这里集中展示 Web UI 的公开访问、认证和运行配置。机器人配置可在配置管理页编辑，cookie 等登录态不在公网面板编辑。</p></div></div><div class="settings-grid"><div class="setting"><span>systemd 服务</span><strong>{{.Service}}</strong><small>主控台按钮会对这个服务执行 start / stop / restart。</small></div><div class="setting"><span>Web UI 端口</span><strong>29173</strong><small>默认公网监听；建议只在云安全组放行你的固定 IP。</small></div><div class="setting"><span>认证方式</span><strong>随机强密码</strong><small>首次启动打印密码，本地仅保存 salted hash。</small></div><div class="setting"><span>失败限速</span><strong>5 次失败锁定 5 分钟</strong><small>降低公网暴力尝试风险。</small></div><div class="setting setting-wide"><span>安全建议</span><strong>公网访问建议配合 HTTPS 反代或安全组白名单</strong><small>如果只是自己使用，优先只开放可信来源 IP；不要把 webui_auth.json、config.json、cookie.json 上传到公开仓库。</small></div></div><div class="setting-actions"><button id="settingsHomeBtn" class="secondary" type="button">返回主控台</button><button id="logoutBtn" class="danger" type="button">退出登录</button></div></div></section>
         </div>
       </div>
     </section>
@@ -577,11 +752,16 @@ const topStatus=document.querySelector('#topStatus');
 const loginToast=document.querySelector('#loginToast');
 const appToast=document.querySelector('#appToast');
 const logSelect=document.querySelector('#logSelect');
+const logFilter=document.querySelector('#logFilter');
+const logKeyword=document.querySelector('#logKeyword');
 const logOutput=document.querySelector('#logOutput');
 const recordsBody=document.querySelector('#recordsBody');
 const chart=document.querySelector('#chart');
+const configForm=document.querySelector('#configForm');
+const configToast=document.querySelector('#configToast');
 let currentLog='';
 let currentLogLabel='';
+let rawLogContent='';
 let logTimer=null;
 let statusTimer=null;
 let activeView='home';
@@ -604,22 +784,35 @@ bindAction(['serviceStopBtn'],'/api/stop','停止命令已发送');
 bindAction(['serviceRestartBtn','homeRestartBtn'],'/api/restart','重启命令已发送');
 for(const id of ['homeRefreshBtn','serviceRefreshBtn']){const el=document.querySelector('#'+id);if(el)el.addEventListener('click',()=>{refreshStatus();loadLogs()})}
 document.querySelector('#logoutBtn').addEventListener('click',async()=>{await api('/logout',{method:'POST'});location.reload()});
+configForm?.addEventListener('submit',async event=>{event.preventDefault();if(configToast)configToast.textContent='';try{const data=await api('/api/config',{method:'POST',body:JSON.stringify(collectConfig())});if(configToast)configToast.textContent='配置已保存：'+(data.path||'config.json')+'；重启服务后生效'}catch(err){if(configToast)configToast.textContent=err.message}});
 logSelect.addEventListener('change',()=>{currentLog=logSelect.value;currentLogLabel=logSelect.selectedOptions[0]?.textContent||currentLog;logScrollLatestOnce=true;loadCurrentLog()});
+logFilter?.addEventListener('change',()=>rerenderCurrentLog());
+logKeyword?.addEventListener('input',()=>rerenderCurrentLog());
 document.querySelector('#copySelectedLogBtn')?.addEventListener('click',()=>copySelectedLog());
 document.querySelector('#copyLogBtn')?.addEventListener('click',()=>copyText(logOutput.dataset.raw||logOutput.textContent||''));
 document.querySelector('#toggleLogRefreshBtn')?.addEventListener('click',event=>{logPaused=!logPaused;if(!logPaused){clearLogLineSelection();window.getSelection()?.removeAllRanges()}event.currentTarget.textContent=logPaused?'继续刷新':'暂停刷新';if(!logPaused)loadCurrentLog()});
 
 async function action(path,text){if(appToast)appToast.textContent='';try{await api(path,{method:'POST'});if(appToast)appToast.textContent=text;setTimeout(refreshStatus,900);setTimeout(loadCurrentLog,1200)}catch(err){if(appToast)appToast.textContent=err.message}}
-async function bootstrap(){await refreshStatus();await loadLogs();clearInterval(logTimer);clearInterval(statusTimer);statusTimer=setInterval(refreshStatus,4000);logTimer=setInterval(loadCurrentLog,1800)}
+async function bootstrap(){await refreshStatus();await loadConfig();await loadLogs();clearInterval(logTimer);clearInterval(statusTimer);statusTimer=setInterval(refreshStatus,4000);logTimer=setInterval(loadCurrentLog,1800)}
 
 async function refreshStatus(){try{const data=await api('/api/status');const running=data.running;const serviceState=document.querySelector('#serviceState');if(serviceState)serviceState.textContent=(data.active||'unknown')+(data.detail?' · '+data.detail:'');document.querySelector('#listenAddr').textContent=data.listenAddr||'—';document.querySelector('#rootDir').textContent=data.rootDir||'—';document.querySelector('#statusText').textContent=data.statusText||'—';document.querySelector('#metricPort').textContent=extractPort(data.listenAddr)||'29173';for(const id of ['serviceStartBtn'])document.querySelector('#'+id).disabled=running;for(const id of ['serviceStopBtn'])document.querySelector('#'+id).disabled=!running;topStatus.innerHTML='<span class="dot '+(running?'on':'')+'"></span><span>'+(running?'运行中':'待机')+'</span>'}catch(err){topStatus.innerHTML='<span class="dot"></span><span>认证失效</span>'}}
+
+async function loadConfig(){if(!configForm)return;try{const data=await api('/api/config');document.querySelector('#configPath').textContent=data.path||'config.json';populateConfig(data.config||{})}catch(err){if(configToast)configToast.textContent='配置读取失败：'+err.message}}
+function populateConfig(config){for(const field of configFields()){const value=getPath(config,field.dataset.path);if(field.type==='checkbox'){field.checked=!!value}else{field.value=value??''}}}
+function collectConfig(){const config={};for(const field of configFields()){let value;if(field.type==='checkbox'){value=field.checked}else if(field.dataset.type==='number'){value=Number(field.value||0)}else{value=field.value}setPath(config,field.dataset.path,value)}return config}
+function configFields(){return Array.from(configForm.querySelectorAll('[data-path]'))}
+function getPath(obj,path){return path.split('.').reduce((acc,key)=>acc&&acc[key],obj)}
+function setPath(obj,path,value){const parts=path.split('.');let cur=obj;for(let i=0;i<parts.length-1;i++){cur[parts[i]]??={};cur=cur[parts[i]]}cur[parts[parts.length-1]]=value}
 
 async function loadLogs(){const data=await api('/api/logs');const files=data.files||[];const previous=currentLog;logSelect.innerHTML='';for(const file of files){const option=document.createElement('option');option.value=file.name;option.textContent=(file.label||file.name)+(file.size?' · '+formatBytes(file.size):'')+(file.modTime?' · '+file.modTime:'');logSelect.appendChild(option)}currentLog=files.some(file=>file.name===previous)?previous:(files[0]?.name||'');logSelect.value=currentLog;currentLogLabel=logSelect.selectedOptions[0]?.textContent||currentLog;await loadCurrentLog()}
 async function loadCurrentLog(){if(logPaused||hasLogSelection())return;if(!currentLog){renderLog('');return}try{const data=await api('/api/logs/read?file='+encodeURIComponent(currentLog));renderLog(data.content||'')}catch(err){renderLog('日志读取失败: '+err.message)}}
 
-function renderLog(content){const box=logOutput.parentElement;const scrollTop=box.scrollTop;const shouldScrollLatest=logScrollLatestOnce;logScrollLatestOnce=false;document.querySelector('#currentSource').textContent=currentLogLabel||'暂无日志源';renderLogLines(content);box.scrollTop=shouldScrollLatest?box.scrollHeight:Math.min(scrollTop,box.scrollHeight);const lines=content?content.split('\n').filter(Boolean):[];const interactions=dedupeInteractions(parseInteractions(lines));const completed=interactions.filter(item=>item.status==='已回复'&&item.question&&item.reply);const failed=interactions.filter(item=>item.status==='失败'&&item.question&&item.reply).length;const pending=interactions.filter(item=>item.status==='待回复'||item.status==='待重试').length;const records=interactions.filter(item=>(item.status==='已回复'||item.status==='失败')&&item.question&&item.reply);document.querySelector('#metricStatus').textContent=interactions.length;document.querySelector('#metricLines').textContent=completed.length;document.querySelector('#metricErrors').textContent=failed;document.querySelector('#metricFiles').textContent=pending;renderRecords(records.slice(-20).reverse());renderTrend(completed);renderTokenRecords(completed)}
+function renderLog(content){rawLogContent=content||'';const box=logOutput.parentElement;const scrollTop=box.scrollTop;const shouldScrollLatest=logScrollLatestOnce;logScrollLatestOnce=false;document.querySelector('#currentSource').textContent=currentLogLabel||'暂无日志源';renderLogLines(filterLogContent(rawLogContent));box.scrollTop=shouldScrollLatest?box.scrollHeight:Math.min(scrollTop,box.scrollHeight);const lines=rawLogContent?rawLogContent.split('\n').filter(Boolean):[];const interactions=dedupeInteractions(parseInteractions(lines));const completed=interactions.filter(item=>item.status==='已回复'&&item.question&&item.reply);const failed=interactions.filter(item=>item.status==='失败'&&item.question&&item.reply).length;const pending=interactions.filter(item=>item.status==='待回复'||item.status==='待重试').length;const records=interactions.filter(item=>(item.status==='已回复'||item.status==='失败')&&item.question&&item.reply);document.querySelector('#metricStatus').textContent=interactions.length;document.querySelector('#metricLines').textContent=completed.length;document.querySelector('#metricErrors').textContent=failed;document.querySelector('#metricFiles').textContent=pending;renderRecords(records.slice(-20).reverse());renderTrend(completed);renderTokenRecords(completed)}
 function renderRecords(items){recordsBody.innerHTML='';if(!items.length){const row=document.createElement('tr');const cell=document.createElement('td');cell.colSpan=5;cell.textContent='暂无可识别的用户提问/机器人回复记录';row.appendChild(cell);recordsBody.appendChild(row);return}for(const item of items){const row=document.createElement('tr');appendCell(row,item.time);appendCell(row,item.user||'未知用户');appendCell(row,item.question,'content-cell');appendCell(row,item.reply||'—','content-cell');const statusCell=document.createElement('td');const badge=document.createElement('span');badge.className='badge '+(item.status==='已回复'?'ok':item.status==='失败'?'error':'warn');badge.textContent=item.status;statusCell.appendChild(badge);const copyBtn=document.createElement('button');copyBtn.type='button';copyBtn.className='copy-btn';copyBtn.textContent='复制';copyBtn.addEventListener('click',()=>copyText(recordText(item)));statusCell.appendChild(copyBtn);row.appendChild(statusCell);recordsBody.appendChild(row)}}
 function renderLogLines(content){const selectedLines=selectedLogLineIndexes();logOutput.innerHTML='';logOutput.dataset.raw=content||'';logOutput.classList.toggle('empty',!content);if(!content){logOutput.textContent='暂无日志。';lastSelectedLogLine=-1;return}content.split('\n').forEach((line,index)=>{const item=document.createElement('span');item.className='log-line';item.dataset.index=String(index);item.textContent=line||' ';item.title='点击选择这一行，Shift 点击选择范围，再点复制选中';item.classList.toggle('selected',selectedLines.has(index));item.addEventListener('click',event=>toggleLogLineSelection(index,event.shiftKey));logOutput.appendChild(item)})}
+function rerenderCurrentLog(){clearLogLineSelection();window.getSelection()?.removeAllRanges();renderLog(rawLogContent)}
+function filterLogContent(content){if(!content)return'';const mode=logFilter?.value||'all';const keyword=(logKeyword?.value||'').trim().toLowerCase();return content.split('\n').filter(line=>matchesLogFilter(line,mode)&&(!keyword||line.toLowerCase().includes(keyword))).join('\n')}
+function matchesLogFilter(line,mode){switch(mode){case'error':return isFailureLine(line);case'ask':return line.includes('[Ai]正在询问Ai');case'reply':return line.includes('[Ai]Ai说：');case'image':return /图片|生图|画图|生成图片|image|upload|imgs/i.test(line);default:return true}}
 function appendCell(row,text,className){const cell=document.createElement('td');if(className){cell.className=className;const inner=document.createElement('div');inner.className='clip-cell';inner.textContent=text||'—';cell.appendChild(inner)}else{cell.textContent=text||'—'}row.appendChild(cell)}
 function renderTokenRecords(items){const totalEl=document.querySelector('#tokenTotal');const hourEl=document.querySelector('#tokenHour');const dayEl=document.querySelector('#tokenDay');const now=Date.now();let total=0;let hour=0;let day=0;for(const item of items){if(!item.tokens)continue;total+=item.tokens;const time=parseItemTime(item.time);if(!time)continue;const age=now-time.getTime();if(age>=0&&age<=3600000)hour+=item.tokens;if(age>=0&&age<=86400000)day+=item.tokens}if(totalEl)totalEl.textContent=formatCount(total);if(hourEl)hourEl.textContent=formatCount(hour);if(dayEl)dayEl.textContent=formatCount(day)}
 function parseInteractions(lines){const items=[];let pending=null;for(const line of lines){if(line.includes('[Ai]正在询问Ai')){const next=parseQuestionLine(line);if(pending&&pending.question){if(sameInteraction(pending,next))continue;items.push(finalizePending(pending))}pending=next;continue}if(line.includes('[Ai]Ai说：')){if(!pending||!pending.question){pending=null;continue}pending.reply=extractJsonField(line,'text')||stripLogPrefix(line);pending.tokens=extractToken(line);pending.status='已回复';items.push(pending);pending=null;continue}if(isFailureLine(line)&&pending&&pending.question&&!pending.lastError){pending.lastError=stripLogPrefix(line);pending.status='待重试'}}if(pending&&pending.question)items.push(finalizePending(pending));return items}

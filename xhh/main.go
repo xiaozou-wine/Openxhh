@@ -24,7 +24,9 @@ var Info struct {
 }
 var CheckTime int
 var ReplyTime int
+var MaxReplyThreads int
 
+const defaultMaxReplyThreads = 3
 const messagePageLimit = 20
 const maxMessagePages = 5
 
@@ -49,6 +51,7 @@ func Init() {
 	}
 	CheckTime = config.ConfigStruct.Xhh.CheckTime
 	ReplyTime = config.ConfigStruct.Xhh.ReplyTime
+	MaxReplyThreads = config.ConfigStruct.Xhh.MaxReplyThreads
 	if CheckTime == 0 {
 		loger.Loger.Warn("[XHH]您的设置中未设置检查时间，已默认为30s")
 		CheckTime = 30
@@ -56,6 +59,10 @@ func Init() {
 	if ReplyTime == 0 {
 		loger.Loger.Warn("[XHH]您的设置中未设置回复间隔，已默认为10s")
 		ReplyTime = 10
+	}
+	if MaxReplyThreads <= 0 {
+		loger.Loger.Warn("[XHH]您的设置中未设置最高回复线程，已默认为3")
+		MaxReplyThreads = defaultMaxReplyThreads
 	}
 	json.Unmarshal(file, &Info)
 }
@@ -215,67 +222,94 @@ func CheckAt() {
 
 func AutoReply() {
 	for {
-		Arr := db.GetComm()
+		Arr := db.GetComm(MaxReplyThreads)
 		if len(Arr) == 0 {
 			fmt.Println("[XHH]无可回复", time.Now().Format("2006-01-02 15:04:05"))
 			time.Sleep(time.Duration(ReplyTime) * time.Second)
 			continue
 		}
+
+		workerCount := MaxReplyThreads
+		if workerCount <= 0 {
+			workerCount = defaultMaxReplyThreads
+		}
+		if workerCount > len(Arr) {
+			workerCount = len(Arr)
+		}
+
+		jobs := make(chan db.CommStruct)
 		var wg sync.WaitGroup
-		loger.Loger.Info("[XHH]正在回复评论", zap.Int("评论数", len(Arr)))
-		wg.Add(len(Arr))
-		for _, v := range Arr {
+		loger.Loger.Info("[XHH]正在回复评论", zap.Int("评论数", len(Arr)), zap.Int("最高回复线程", workerCount))
+		for i := 0; i < workerCount; i++ {
+			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				if v.CommentID == 0 {
-					fmt.Println("[XHH]无事可做")
-					return
-				}
-
-				if !Check(v.Uid) {
-					db.ReplyedMsg(v.MsgID)
-					return
-				}
-
-				var isok bool
-				handledImage, imageOK := HandleImageGenerationComment(v.LinkID, v.CommentID, v.RootID, v.Uid, v.UserName, v.Text)
-				if handledImage {
-					isok = imageOK
-				} else {
-					Info, top, tags, mention := GetLinkInfo(v.LinkID, v.RootID, v.CommentID, v.Uid)
-					if len(Info) <= 1 {
-						loger.Loger.Info("[XHH]无法整理@消息，已标记完成避免阻塞", zap.Int("comment_id", v.CommentID), zap.Int("link_id", v.LinkID))
-						db.ReplyedMsg(v.MsgID)
-						return
-					}
-					mentionTrigger := ShouldMentionTarget(v.Text)
-					mentionTarget := mention != "" && mentionTrigger
-					loger.Loger.Info("[XHH]Mention decision", zap.Bool("trigger", mentionTrigger), zap.Bool("hasMention", mention != ""))
-					ReplyText := ai.GetAiReply(Info, v.Text, top, tags)
-					if ReplyText == "" {
-						loger.Loger.Info("[XHH]Ai返回错误")
-						IsErr()
-						return
-					}
-					explicitMention := GetExplicitMentionFromPost(v.LinkID, v.Text, v.Uid)
-					if explicitMention != "" {
-						ReplyText = explicitMention + " " + ReplyText
-					} else if mentionTarget {
-						ReplyText = mention + " " + ReplyText
-					}
-					isok = Reply(ReplyText, strconv.Itoa(v.LinkID), strconv.Itoa(v.CommentID), strconv.Itoa(v.RootID), "")
-				}
-
-				if isok {
-					db.ReplyedMsg(v.MsgID)
-				} else {
-					IsErr()
-					loger.Loger.Error("[XHH]无法回复评论")
+				for v := range jobs {
+					replyComment(v)
 				}
 			}()
 		}
+		for _, v := range Arr {
+			jobs <- v
+		}
+		close(jobs)
 		wg.Wait()
 		time.Sleep(time.Duration(ReplyTime) * time.Second)
 	}
+}
 
+func appendOwnerContext(contents []ai.Content, userID int) []ai.Content {
+	if !IsOwner(userID) {
+		return contents
+	}
+	return append(contents, ai.Content{Type: "text", Text: "当前发言用户是机器人 owner。请把这视为身份信息，不要在回复中生硬提及。"})
+}
+
+func replyComment(v db.CommStruct) {
+	if v.CommentID == 0 {
+		fmt.Println("[XHH]无事可做")
+		return
+	}
+
+	if !Check(v.Uid) {
+		db.ReplyedMsg(v.MsgID)
+		return
+	}
+
+	var isok bool
+	handledImage, imageOK := HandleImageGenerationComment(v.LinkID, v.CommentID, v.RootID, v.Uid, v.UserName, v.Text)
+	if handledImage {
+		isok = imageOK
+	} else {
+		Info, top, tags, mention := GetLinkInfo(v.LinkID, v.RootID, v.CommentID, v.Uid)
+		if len(Info) <= 1 {
+			loger.Loger.Info("[XHH]无法整理@消息，已标记完成避免阻塞", zap.Int("comment_id", v.CommentID), zap.Int("link_id", v.LinkID))
+			db.ReplyedMsg(v.MsgID)
+			return
+		}
+		Info = appendOwnerContext(Info, v.Uid)
+		mentionTrigger := ShouldMentionTarget(v.Text)
+		mentionTarget := mention != "" && mentionTrigger
+		loger.Loger.Info("[XHH]Mention decision", zap.Bool("trigger", mentionTrigger), zap.Bool("hasMention", mention != ""))
+		ReplyText := ai.GetAiReply(Info, v.Text, top, tags)
+		if ReplyText == "" {
+			loger.Loger.Info("[XHH]Ai返回错误")
+			IsErr()
+			return
+		}
+		explicitMention := GetExplicitMentionFromPost(v.LinkID, v.Text, v.Uid)
+		if explicitMention != "" {
+			ReplyText = explicitMention + " " + ReplyText
+		} else if mentionTarget {
+			ReplyText = mention + " " + ReplyText
+		}
+		isok = Reply(ReplyText, strconv.Itoa(v.LinkID), strconv.Itoa(v.CommentID), strconv.Itoa(v.RootID), "")
+	}
+
+	if isok {
+		db.ReplyedMsg(v.MsgID)
+	} else {
+		IsErr()
+		loger.Loger.Error("[XHH]无法回复评论")
+	}
 }

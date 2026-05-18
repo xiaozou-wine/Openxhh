@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"strings"
+
 	"openxhh/config"
 	"openxhh/loger"
 	"openxhh/pg"
@@ -111,23 +112,27 @@ func ReplyedMsg(msgID int) {
 }
 
 type CommStruct struct {
-	MsgID    int
-	LinkID   int
+	MsgID     int
+	LinkID    int
 	CommentID int
-	RootID   int
-	Text     string
-	Uid      int
-	UserName string
+	RootID    int
+	Text      string
+	Uid       int
+	UserName  string
 }
 
-func GetComm() (CommArr []CommStruct) {
+func GetComm(limit int) (CommArr []CommStruct) {
+	if limit <= 0 {
+		limit = 1
+	}
 	ctx := context.Background()
 	if cfg.Type == "pg" {
-		row, err := pg.Conn.Query(ctx, "SELECT msg_id,link_id,comment_a_id,comment_root_id,comment_text,user_a_id,user_a_name FROM at WHERE reply=false LIMIT 3")
+		row, err := pg.Conn.Query(ctx, "SELECT msg_id,link_id,comment_a_id,comment_root_id,comment_text,user_a_id,user_a_name FROM at WHERE reply=false LIMIT $1", limit)
 		if err != nil {
 			loger.Loger.Error("[DB]无法获取评论信息", zap.Error(err))
 			return
 		}
+		defer row.Close()
 		for row.Next() {
 			var Comm CommStruct
 			row.Scan(&Comm.MsgID, &Comm.LinkID, &Comm.CommentID, &Comm.RootID, &Comm.Text, &Comm.Uid, &Comm.UserName)
@@ -136,11 +141,12 @@ func GetComm() (CommArr []CommStruct) {
 		return
 	}
 	if cfg.Type == "sqlite" {
-		row, err := sqlite.Db.Query("SELECT msg_id,link_id,comment_a_id,comment_root_id,comment_text,user_a_id,user_a_name FROM at WHERE reply=false LIMIT 3")
+		row, err := sqlite.Db.Query("SELECT msg_id,link_id,comment_a_id,comment_root_id,comment_text,user_a_id,user_a_name FROM at WHERE reply=false LIMIT ?", limit)
 		if err != nil {
 			loger.Loger.Error("[DB]无法获取评论信息", zap.Error(err))
 			return
 		}
+		defer row.Close()
 		for row.Next() {
 			var Comm CommStruct
 			row.Scan(&Comm.MsgID, &Comm.LinkID, &Comm.CommentID, &Comm.RootID, &Comm.Text, &Comm.Uid, &Comm.UserName)

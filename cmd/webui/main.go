@@ -42,13 +42,15 @@ type authStore struct {
 
 type appConfig struct {
 	Xhh struct {
-		CheckTime int    `json:"checkTime"`
-		ReplyTime int    `json:"replyTime"`
-		Owner     string `json:"owner"`
-		DeviceID  string `json:"deviceID"`
-		BaseURL   string `json:"baseUrl"`
-		WebVer    string `json:"webver"`
-		Ver       string `json:"version"`
+		CheckTime       int    `json:"checkTime"`
+		ReplyTime       int    `json:"replyTime"`
+		MaxReplyThreads int    `json:"maxReplyThreads"`
+		EnableWhitelist bool   `json:"enableWhitelist"`
+		Owner           string `json:"owner"`
+		DeviceID        string `json:"deviceID"`
+		BaseURL         string `json:"baseUrl"`
+		WebVer          string `json:"webver"`
+		Ver             string `json:"version"`
 	} `json:"xhh"`
 	DataBase struct {
 		Type   string `json:"type"`
@@ -104,26 +106,71 @@ type logFile struct {
 	ModTime string `json:"modTime"`
 }
 
+type webUIOptions struct {
+	addr     string
+	root     string
+	robotBin string
+}
+
+type runningServer struct {
+	state    *serverState
+	server   *http.Server
+	listener net.Listener
+	url      string
+}
+
 func main() {
 	addr := flag.String("addr", defaultAddr, "web ui listen address")
 	root := flag.String("root", defaultRoot(), "Openxhh working directory")
 	bin := flag.String("bin", "", "Openxhh executable path")
-	openBrowserFlag := flag.Bool("open-browser", false, "open browser after Web UI starts")
+	browserFlag := flag.Bool("browser", false, "open the Web UI in the system browser")
+	openBrowserFlag := flag.Bool("open-browser", false, "deprecated alias for -browser")
+	serverOnlyFlag := flag.Bool("server-only", false, "only start the local Web UI server")
+	desktopFlag := flag.Bool("desktop", runtime.GOOS == "windows", "open the Web UI in an Openxhh desktop window")
 	flag.Parse()
 
-	rootDir, err := filepath.Abs(*root)
+	running, err := startWebUIServer(webUIOptions{addr: *addr, root: *root, robotBin: *bin})
 	if err != nil {
 		log.Fatal(err)
 	}
-	if err := os.MkdirAll(rootDir, 0755); err != nil {
-		log.Fatal(err)
+	defer running.close()
+
+	if *browserFlag || *openBrowserFlag {
+		go running.logServe()
+		if err := openBrowser(running.url); err != nil {
+			log.Printf("打开浏览器失败: %v", err)
+		}
+		select {}
 	}
 
-	robotBin := strings.TrimSpace(*bin)
+	if *serverOnlyFlag || !*desktopFlag {
+		log.Fatal(running.serve())
+	}
+
+	go running.logServe()
+	if err := runDesktop(running.url); err != nil {
+		log.Printf("桌面窗口启动失败: %v", err)
+		if err := openBrowser(running.url); err != nil {
+			log.Printf("打开浏览器失败: %v", err)
+		}
+		select {}
+	}
+}
+
+func startWebUIServer(options webUIOptions) (*runningServer, error) {
+	rootDir, err := filepath.Abs(options.root)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(rootDir, 0755); err != nil {
+		return nil, err
+	}
+
+	robotBin := strings.TrimSpace(options.robotBin)
 	if robotBin != "" {
 		robotBin, err = filepath.Abs(robotBin)
 		if err != nil {
-			log.Fatal(err)
+			return nil, err
 		}
 	}
 
@@ -136,7 +183,7 @@ func main() {
 
 	password, created, err := ensureAuth(state.authPath)
 	if err != nil {
-		log.Fatal(err)
+		return nil, err
 	}
 	if created {
 		state.bootstrapPassword = password
@@ -159,9 +206,9 @@ func main() {
 	mux.HandleFunc("/api/logs", state.requireAuth(state.handleLogs))
 	mux.HandleFunc("/api/logs/read", state.requireAuth(state.handleReadLog))
 
-	listener, err := net.Listen("tcp", *addr)
+	listener, err := net.Listen("tcp", options.addr)
 	if err != nil {
-		log.Fatalf("监听 %s 失败: %v", *addr, err)
+		return nil, fmt.Errorf("监听 %s 失败: %w", options.addr, err)
 	}
 
 	state.listenAddr = listener.Addr().String()
@@ -171,15 +218,30 @@ func main() {
 	if robotBin != "" {
 		fmt.Printf("主程序: %s\n", robotBin)
 	}
-	if *openBrowserFlag {
-		go func() {
-			time.Sleep(300 * time.Millisecond)
-			if err := openBrowser(url); err != nil {
-				log.Printf("打开浏览器失败: %v", err)
-			}
-		}()
+
+	return &runningServer{
+		state:    state,
+		server:   &http.Server{Handler: withSecurityHeaders(mux)},
+		listener: listener,
+		url:      url,
+	}, nil
+}
+
+func (s *runningServer) serve() error {
+	if err := s.server.Serve(s.listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
 	}
-	log.Fatal(http.Serve(listener, withSecurityHeaders(mux)))
+	return nil
+}
+
+func (s *runningServer) logServe() {
+	if err := s.serve(); err != nil {
+		log.Printf("Web UI 服务退出: %v", err)
+	}
+}
+
+func (s *runningServer) close() {
+	_ = s.server.Close()
 }
 
 func defaultRoot() string {
@@ -440,6 +502,10 @@ func applyConfigDefaults(cfg *appConfig) bool {
 	}
 	if cfg.Xhh.ReplyTime == 0 {
 		cfg.Xhh.ReplyTime = 30
+		changed = true
+	}
+	if cfg.Xhh.MaxReplyThreads <= 0 {
+		cfg.Xhh.MaxReplyThreads = 3
 		changed = true
 	}
 	if cfg.Xhh.BaseURL == "" {
@@ -735,7 +801,7 @@ func (s *serverState) autoStartCommand() string {
 	if err != nil {
 		exe = os.Args[0]
 	}
-	parts := []string{exe, "-addr", s.listenAddr, "-root", s.rootDir, "-open-browser"}
+	parts := []string{exe, "-addr", s.listenAddr, "-root", s.rootDir, "-desktop"}
 	if s.robotBin != "" {
 		parts = append(parts, "-bin", s.robotBin)
 	}
@@ -1074,7 +1140,9 @@ const indexHTML = `<!doctype html>
               <h3>小黑盒</h3>
               <div class="field"><label>检查间隔/秒</label><input class="input" data-path="xhh.checkTime" data-type="number"></div>
               <div class="field"><label>回复间隔/秒</label><input class="input" data-path="xhh.replyTime" data-type="number"></div>
-              <div class="field"><label>Owner 数字 UID</label><input class="input" data-path="xhh.owner"></div>
+              <div class="field"><label>最高回复线程</label><input class="input" data-path="xhh.maxReplyThreads" data-type="number"></div>
+              <label class="switch field wide"><span>启用白名单（关闭时回复所有 @，仍识别 owner）</span><input data-path="xhh.enableWhitelist" data-type="bool" type="checkbox"></label>
+              <div class="field wide"><label>Owner / 白名单 UID（英文逗号分隔）</label><input class="input" data-path="xhh.owner"></div>
               <div class="field"><label>Device ID</label><input class="input" data-path="xhh.deviceID"></div>
               <div class="field wide"><label>API Base URL</label><input class="input" data-path="xhh.baseUrl"></div>
               <div class="field"><label>Web Version</label><input class="input" data-path="xhh.webver"></div>

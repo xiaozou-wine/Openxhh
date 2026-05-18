@@ -84,12 +84,12 @@ Source: "..\..\dist\windows\{#MyAppWebUIExeName}"; DestDir: "{app}"; Flags: igno
 
 [Icons]
 
-Name: "{autoprograms}\Openxhh 控制台"; Filename: "{app}\{#MyAppWebUIExeName}"; Parameters: "-root ""{commonappdata}\Openxhh"" -bin ""{app}\{#MyAppExeName}"" -open-browser"; WorkingDir: "{commonappdata}\Openxhh"
+Name: "{autoprograms}\Openxhh 控制台"; Filename: "{app}\{#MyAppWebUIExeName}"; Parameters: "-root ""{commonappdata}\Openxhh"" -bin ""{app}\{#MyAppExeName}"""; WorkingDir: "{commonappdata}\Openxhh"
 
-Name: "{autodesktop}\Openxhh 控制台"; Filename: "{app}\{#MyAppWebUIExeName}"; Parameters: "-root ""{commonappdata}\Openxhh"" -bin ""{app}\{#MyAppExeName}"" -open-browser"; WorkingDir: "{commonappdata}\Openxhh"; Tasks: desktopicon
+Name: "{autodesktop}\Openxhh 控制台"; Filename: "{app}\{#MyAppWebUIExeName}"; Parameters: "-root ""{commonappdata}\Openxhh"" -bin ""{app}\{#MyAppExeName}"""; WorkingDir: "{commonappdata}\Openxhh"; Tasks: desktopicon
 
 
 
 [Run]
 
-Filename: "{app}\{#MyAppWebUIExeName}"; Parameters: "-root ""{commonappdata}\Openxhh"" -bin ""{app}\{#MyAppExeName}"" -open-browser"; WorkingDir: "{commonappdata}\Openxhh"; Description: "启动 Openxhh 控制台"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#MyAppWebUIExeName}"; Parameters: "-root ""{commonappdata}\Openxhh"" -bin ""{app}\{#MyAppExeName}"""; WorkingDir: "{commonappdata}\Openxhh"; Description: "启动 Openxhh 控制台"; Flags: nowait postinstall skipifsilent

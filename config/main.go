@@ -8,13 +8,15 @@ import (
 
 var ConfigStruct struct {
 	Xhh struct {
-		CheckTime int    `json:"checkTime"`
-		ReplyTime int    `json:"replyTime"`
-		Owner     string `json:"owner"`
-		DeviceID  string `json:"deviceID"`
-		BaseUrl   string `json:"baseUrl"`
-		WebVer    string `json:"webver"`
-		Ver       string `json:"version"`
+		CheckTime       int    `json:"checkTime"`
+		ReplyTime       int    `json:"replyTime"`
+		MaxReplyThreads int    `json:"maxReplyThreads"`
+		EnableWhitelist bool   `json:"enableWhitelist"`
+		Owner           string `json:"owner"`
+		DeviceID        string `json:"deviceID"`
+		BaseUrl         string `json:"baseUrl"`
+		WebVer          string `json:"webver"`
+		Ver             string `json:"version"`
 	} `json:"xhh"`
 	DataBase struct {
 		Type   string `json:"type"`
@@ -86,6 +88,10 @@ func applyDefaults() bool {
 	}
 	if ConfigStruct.Xhh.ReplyTime == 0 {
 		ConfigStruct.Xhh.ReplyTime = 30
+		changed = true
+	}
+	if ConfigStruct.Xhh.MaxReplyThreads <= 0 {
+		ConfigStruct.Xhh.MaxReplyThreads = 3
 		changed = true
 	}
 	if ConfigStruct.Xhh.BaseUrl == "" {

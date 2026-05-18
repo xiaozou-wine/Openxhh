@@ -20,7 +20,8 @@ Openxhh 的目标是让机器人更像一个真的在看帖的人：
 
 ## 主要功能
 
-- 自动检查白名单用户的 @ 消息，并调用 OpenAI 兼容接口回复。
+- 自动检查所有 @ 消息，并调用 OpenAI 兼容接口回复；也可手动开启白名单。
+- 支持限制最高回复线程，避免后台一次性并发过多。
 - 支持自定义 AI 接口、模型、token 和 prompt。
 - 支持 SQLite / PostgreSQL；个人部署推荐 SQLite。
 - 支持小黑盒扫码登录，登录态保存到 `cookie.json`。
@@ -80,7 +81,9 @@ sudo nano /opt/Openxhh/config.json
   "xhh": {
     "checkTime": 60,
     "replyTime": 30,
-    "owner": "你的小黑盒数字UID",
+    "maxReplyThreads": 3,
+    "enableWhitelist": false,
+    "owner": "你的 owner 数字UID；开启白名单时也作为允许 UID，多个用英文逗号分隔",
     "deviceID": "",
     "baseUrl": "https://api.xiaoheihe.cn",
     "webver": "2.5",
@@ -121,7 +124,10 @@ sudo nano /opt/Openxhh/config.json
 
 配置要点：
 
-- `xhh.owner` 填小黑盒数字 UID，不是昵称。
+- 默认 `xhh.enableWhitelist=false`，机器人会回复所有 @；需要只回复 owner / 指定用户时，改为 `true`。
+- `xhh.owner` 填小黑盒数字 UID，不是昵称；多个 UID 用英文逗号分隔。即使白名单关闭，机器人也会用它识别 owner 身份。
+- 开启白名单后，`xhh.owner` 会自动作为允许回复的 UID 列表，不需要额外重复添加。
+- `xhh.maxReplyThreads` 控制同一轮最多并发回复数，个人部署建议保持 `3` 或更低。
 - `ai.baseUrl` 要填完整的 Chat Completions 地址，例如 `/v1/chat/completions`。
 - `image.baseUrl` 要填完整的 Images Generations 地址，例如 `/v1/images/generations`。
 - `image.uploadMode=external` 是当前推荐方案，会把图片写入 `image.externalDir`，评论里使用 `image.externalBaseUrl`。
@@ -439,7 +445,7 @@ C:\ProgramData\Openxhh\log\
 
 1. 启动 Openxhh 控制台。
 2. 保存页面显示的随机控制台密码，并登录本地控制台。
-3. 在配置向导中填写小黑盒 UID、AI 接口、模型和 token。
+3. 在配置向导中填写 owner UID、AI 接口、模型和 token；如需只回复 owner / 指定用户，再开启白名单。
 4. 点击“扫码登录”，使用小黑盒 App 扫码。
 5. 日志提示 Cookie 已保存后，点击“启动”。
 
