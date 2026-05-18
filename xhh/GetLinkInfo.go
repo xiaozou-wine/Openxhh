@@ -264,6 +264,9 @@ func extractExplicitMentionTarget(text string) string {
 			continue
 		}
 		target := strings.Trim(strings.TrimSpace(match[1]), "@：:，,。.!！?？、")
+		for _, suffix := range []string{"看看", "查看", "看下", "来看", "评价", "一下"} {
+			target = strings.TrimSuffix(target, suffix)
+		}
 		if target == "" || strings.Contains(target, "机器人") {
 			continue
 		}
