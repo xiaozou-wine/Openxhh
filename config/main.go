@@ -56,11 +56,12 @@ func InitConfig() {
 	file, err := os.ReadFile(wd + "/config.json")
 	if err != nil {
 		if os.IsNotExist(err) {
-			Data, err := json.Marshal(ConfigStruct)
+			applyDefaults()
+			Data, err := json.MarshalIndent(ConfigStruct, "", "  ")
 			if err != nil {
 				panic(err)
 			}
-			os.WriteFile("./config.json", Data, 0644)
+			os.WriteFile("./config.json", append(Data, '\n'), 0644)
 			loger.Loger.Fatal("请修改配置文件后重新启动")
 		}
 		panic(err)
@@ -69,5 +70,63 @@ func InitConfig() {
 	if err != nil {
 		panic(err)
 	}
+	if applyDefaults() {
+		if Data, err := json.MarshalIndent(ConfigStruct, "", "  "); err == nil {
+			_ = os.WriteFile("./config.json", append(Data, '\n'), 0644)
+		}
+	}
 	loger.Loger.Info("[CFG]Init OK")
+}
+
+func applyDefaults() bool {
+	changed := false
+	if ConfigStruct.Xhh.CheckTime == 0 {
+		ConfigStruct.Xhh.CheckTime = 60
+		changed = true
+	}
+	if ConfigStruct.Xhh.ReplyTime == 0 {
+		ConfigStruct.Xhh.ReplyTime = 30
+		changed = true
+	}
+	if ConfigStruct.Xhh.BaseUrl == "" {
+		ConfigStruct.Xhh.BaseUrl = "https://api.xiaoheihe.cn"
+		changed = true
+	}
+	if ConfigStruct.Xhh.WebVer == "" {
+		ConfigStruct.Xhh.WebVer = "2.5"
+		changed = true
+	}
+	if ConfigStruct.Xhh.Ver == "" {
+		ConfigStruct.Xhh.Ver = "999.0.4"
+		changed = true
+	}
+	if ConfigStruct.DataBase.Type == "" {
+		ConfigStruct.DataBase.Type = "sqlite"
+		changed = true
+	}
+	if ConfigStruct.Image.Model == "" {
+		ConfigStruct.Image.Model = "gpt-image-2"
+		changed = true
+	}
+	if ConfigStruct.Image.Size == "" {
+		ConfigStruct.Image.Size = "1024x1024"
+		changed = true
+	}
+	if ConfigStruct.Image.ResponseFormat == "" {
+		ConfigStruct.Image.ResponseFormat = "b64_json"
+		changed = true
+	}
+	if ConfigStruct.Image.OutputDir == "" {
+		ConfigStruct.Image.OutputDir = "images"
+		changed = true
+	}
+	if ConfigStruct.Image.UploadMode == "" {
+		ConfigStruct.Image.UploadMode = "external"
+		changed = true
+	}
+	if ConfigStruct.Image.PromptMaxChars == 0 {
+		ConfigStruct.Image.PromptMaxChars = 1000
+		changed = true
+	}
+	return changed
 }

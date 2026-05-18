@@ -7,13 +7,26 @@ import (
 	"openxhh/config"
 	"openxhh/loger"
 	"strconv"
+	"strings"
 
 	"go.uber.org/zap"
 )
 
 func SendReq(Method, Path string, Body io.Reader, other string) *http.Response {
 	cfg := config.ConfigStruct.Xhh
-	u, err := url.Parse(cfg.BaseUrl + Path + other)
+	baseURL := strings.TrimRight(strings.TrimSpace(cfg.BaseUrl), "/")
+	if baseURL == "" {
+		baseURL = "https://api.xiaoheihe.cn"
+	}
+	version := strings.TrimSpace(cfg.Ver)
+	if version == "" {
+		version = "999.0.4"
+	}
+	webVersion := strings.TrimSpace(cfg.WebVer)
+	if webVersion == "" {
+		webVersion = "2.5"
+	}
+	u, err := url.Parse(baseURL + Path + other)
 	if err != nil {
 		loger.Loger.Error("[SendReq]Creat requset url failed")
 		return nil
@@ -23,8 +36,8 @@ func SendReq(Method, Path string, Body io.Reader, other string) *http.Response {
 	reqUrl.Set("os_type", "web")
 	reqUrl.Set("app", "web")
 	reqUrl.Set("client_type", "web")
-	reqUrl.Set("version", cfg.Ver)
-	reqUrl.Set("web_version", cfg.WebVer)
+	reqUrl.Set("version", version)
+	reqUrl.Set("web_version", webVersion)
 	reqUrl.Set("x_client_type", "web")
 	reqUrl.Set("x_app", "heybox_website")
 	if Info.HeyBoxId != "" {

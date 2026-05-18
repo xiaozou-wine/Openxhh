@@ -378,6 +378,7 @@ func (s *serverState) handleConfig(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "配置格式错误: " + err.Error()})
 			return
 		}
+		applyConfigDefaults(&cfg)
 		data, err := json.MarshalIndent(cfg, "", "  ")
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
@@ -409,6 +410,11 @@ func (s *serverState) loadConfig() (appConfig, bool, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return cfg, true, err
 	}
+	if applyConfigDefaults(&cfg) {
+		if data, err := json.MarshalIndent(cfg, "", "  "); err == nil {
+			_ = os.WriteFile(s.configPath(), append(data, '\n'), 0600)
+		}
+	}
 	return cfg, true, nil
 }
 
@@ -422,20 +428,65 @@ func (s *serverState) qrCodePath() string {
 
 func defaultConfig() appConfig {
 	var cfg appConfig
-	cfg.Xhh.CheckTime = 60
-	cfg.Xhh.ReplyTime = 30
-	cfg.Xhh.BaseURL = "https://api.xiaoheihe.cn"
-	cfg.Xhh.WebVer = "2.5"
-	cfg.Xhh.Ver = "999.0.4"
-	cfg.DataBase.Type = "sqlite"
-	cfg.AI.Prompt = "请根据评论内容自然回复。"
-	cfg.Image.Model = "gpt-image-2"
-	cfg.Image.Size = "1024x1024"
-	cfg.Image.ResponseFormat = "b64_json"
-	cfg.Image.OutputDir = "images"
-	cfg.Image.UploadMode = "external"
-	cfg.Image.PromptMaxChars = 1000
+	applyConfigDefaults(&cfg)
 	return cfg
+}
+
+func applyConfigDefaults(cfg *appConfig) bool {
+	changed := false
+	if cfg.Xhh.CheckTime == 0 {
+		cfg.Xhh.CheckTime = 60
+		changed = true
+	}
+	if cfg.Xhh.ReplyTime == 0 {
+		cfg.Xhh.ReplyTime = 30
+		changed = true
+	}
+	if cfg.Xhh.BaseURL == "" {
+		cfg.Xhh.BaseURL = "https://api.xiaoheihe.cn"
+		changed = true
+	}
+	if cfg.Xhh.WebVer == "" {
+		cfg.Xhh.WebVer = "2.5"
+		changed = true
+	}
+	if cfg.Xhh.Ver == "" {
+		cfg.Xhh.Ver = "999.0.4"
+		changed = true
+	}
+	if cfg.DataBase.Type == "" {
+		cfg.DataBase.Type = "sqlite"
+		changed = true
+	}
+	if cfg.AI.Prompt == "" {
+		cfg.AI.Prompt = "请根据评论内容自然回复。"
+		changed = true
+	}
+	if cfg.Image.Model == "" {
+		cfg.Image.Model = "gpt-image-2"
+		changed = true
+	}
+	if cfg.Image.Size == "" {
+		cfg.Image.Size = "1024x1024"
+		changed = true
+	}
+	if cfg.Image.ResponseFormat == "" {
+		cfg.Image.ResponseFormat = "b64_json"
+		changed = true
+	}
+	if cfg.Image.OutputDir == "" {
+		cfg.Image.OutputDir = "images"
+		changed = true
+	}
+	if cfg.Image.UploadMode == "" {
+		cfg.Image.UploadMode = "external"
+		changed = true
+	}
+	if cfg.Image.PromptMaxChars == 0 {
+		cfg.Image.PromptMaxChars = 1000
+		changed = true
+	}
+	return changed
 }
 
 func (s *serverState) handleStart(w http.ResponseWriter, r *http.Request) {
