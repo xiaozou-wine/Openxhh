@@ -15,11 +15,13 @@ import (
 
 func main() {
 	loger.InitLog()
-	config.InitConfig()
-	time.Sleep(1 * time.Second)
-	db.Init()
 	mode := flag.String("mode", "default", "Switch a mode when start")
 	flag.Parse()
+	config.InitConfig()
+	time.Sleep(1 * time.Second)
+	if *mode == "start" {
+		db.Init()
+	}
 	start(mode)
 }
 

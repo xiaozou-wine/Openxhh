@@ -153,6 +153,7 @@ func main() {
 	mux.HandleFunc("/api/config", state.requireAuth(state.handleConfig))
 	mux.HandleFunc("/api/start", state.requireAuth(state.handleStart))
 	mux.HandleFunc("/api/robot-login", state.requireAuth(state.handleRobotLogin))
+	mux.HandleFunc("/api/qrcode", state.requireAuth(state.handleQRCode))
 	mux.HandleFunc("/api/stop", state.requireAuth(state.handleStop))
 	mux.HandleFunc("/api/autostart", state.requireAuth(state.handleAutoStart))
 	mux.HandleFunc("/api/logs", state.requireAuth(state.handleLogs))
@@ -354,6 +355,7 @@ func (s *serverState) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"stdoutLog":          baseName(stdoutPath),
 		"configExists":       fileExists(s.configPath()),
 		"cookieExists":       fileExists(filepath.Join(s.rootDir, "cookie.json")),
+		"qrCodeExists":       fileExists(s.qrCodePath()),
 		"autoStartEnabled":   autoStartEnabled,
 		"autoStartSupported": autoStartSupported,
 		"autoStartError":     autoStartError,
@@ -414,6 +416,10 @@ func (s *serverState) configPath() string {
 	return filepath.Join(s.rootDir, "config.json")
 }
 
+func (s *serverState) qrCodePath() string {
+	return filepath.Join(s.rootDir, "qrcode.png")
+}
+
 func defaultConfig() appConfig {
 	var cfg appConfig
 	cfg.Xhh.CheckTime = 60
@@ -445,7 +451,25 @@ func (s *serverState) handleRobotLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if err := os.Remove(s.qrCodePath()); err != nil && !errors.Is(err, os.ErrNotExist) {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
 	s.startManagedProcess(w, "login")
+}
+
+func (s *serverState) handleQRCode(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !fileExists(s.qrCodePath()) {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "image/png")
+	http.ServeFile(w, r, s.qrCodePath())
 }
 
 func (s *serverState) startManagedProcess(w http.ResponseWriter, mode string) {
@@ -914,6 +938,9 @@ const indexHTML = `<!doctype html>
     .form-group h3 { grid-column: 1 / -1; margin: 0; font-size: 15px; color: var(--cyan); }
     .switch { display: flex; align-items: center; justify-content: space-between; gap: 12px; border: 1px solid var(--line); border-radius: 16px; padding: 13px; background: rgba(2,5,9,.3); }
     .switch input { width: 22px; height: 22px; }
+    .qr-card { display: grid; gap: 10px; margin-top: 14px; padding: 14px; border: 1px solid rgba(82,224,255,.3); border-radius: 18px; background: rgba(82,224,255,.07); }
+    .qr-card img { width: 220px; height: 220px; padding: 10px; border-radius: 16px; background: #fff; justify-self: center; }
+    .qr-card small { color: var(--muted); line-height: 1.55; }
     .log-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 18px; border-bottom: 1px solid var(--line); }
     .terminal { height: min(56vh, 620px); overflow: auto; padding: 20px; background: rgba(0,0,0,.42); border-radius: 0 0 26px 26px; }
     pre { margin: 0; white-space: pre-wrap; word-break: break-word; line-height: 1.55; color: #c7d6e8; font-size: 13px; }
@@ -969,6 +996,11 @@ const indexHTML = `<!doctype html>
             <button id="robotLoginBtn" class="secondary" type="button">扫码登录</button>
             <button id="refreshBtn" class="secondary" type="button">刷新日志</button>
             <button id="logoutBtn" class="secondary" type="button">退出</button>
+          </div>
+          <div id="qrCard" class="qr-card hidden">
+            <strong>小黑盒扫码登录</strong>
+            <img id="qrCode" alt="小黑盒登录二维码">
+            <small>请使用小黑盒 App 扫描二维码。扫码成功后会自动保存 cookie.json。</small>
           </div>
           <label class="switch" style="margin-top:14px">
             <span><strong>开机自启控制台</strong><br><small id="autoStartText">读取中</small></span>
@@ -1058,6 +1090,8 @@ const indexHTML = `<!doctype html>
     const logOutput = document.querySelector('#logOutput');
     const configForm = document.querySelector('#configForm');
     const autoStartToggle = document.querySelector('#autoStartToggle');
+    const qrCard = document.querySelector('#qrCard');
+    const qrCode = document.querySelector('#qrCode');
     let currentLog = '';
     let logTimer = null;
     let statusTimer = null;
@@ -1092,7 +1126,7 @@ const indexHTML = `<!doctype html>
 
     document.querySelector('#startBtn').addEventListener('click', () => action('/api/start', '启动命令已发送'));
     document.querySelector('#stopBtn').addEventListener('click', () => action('/api/stop', '停止命令已发送'));
-    document.querySelector('#robotLoginBtn').addEventListener('click', () => action('/api/robot-login', '登录流程已启动，请在日志里扫码'));
+    document.querySelector('#robotLoginBtn').addEventListener('click', startRobotLogin);
     document.querySelector('#refreshBtn').addEventListener('click', loadLogs);
     document.querySelector('#logoutBtn').addEventListener('click', async () => {
       await api('/logout', { method: 'POST' });
@@ -1137,6 +1171,28 @@ const indexHTML = `<!doctype html>
       }
     }
 
+    async function startRobotLogin() {
+      appToast.textContent = '';
+      try {
+        await api('/api/robot-login', { method: 'POST' });
+        appToast.textContent = '登录流程已启动，二维码生成后会显示在左侧';
+        await refreshStatus();
+        await loadLogs();
+      } catch (error) {
+        appToast.textContent = error.message;
+      }
+    }
+
+    function updateQRCode(data) {
+      const visible = !!data.qrCodeExists && (data.processMode === 'login' || !data.cookieExists);
+      qrCard.classList.toggle('hidden', !visible);
+      if (visible) {
+        qrCode.src = '/api/qrcode?t=' + Date.now();
+      } else {
+        qrCode.removeAttribute('src');
+      }
+    }
+
     async function bootstrap() {
       await refreshStatus();
       await loadConfig();
@@ -1163,6 +1219,7 @@ const indexHTML = `<!doctype html>
         document.querySelector('#robotLoginBtn').disabled = data.running;
         autoStartToggle.disabled = !data.autoStartSupported;
         autoStartToggle.checked = !!data.autoStartEnabled;
+        updateQRCode(data);
         document.querySelector('#autoStartText').textContent = data.autoStartSupported ? (data.autoStartEnabled ? '已启用' : '未启用') : '当前系统不支持';
         topStatus.innerHTML = '<span class="dot ' + (data.running ? 'on' : '') + '"></span><span>' + runningText + '</span>';
       } catch (error) {

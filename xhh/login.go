@@ -46,6 +46,7 @@ func Qr() {
 	}
 	var resps data
 	read, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
 	fmt.Println(string(read))
 	if err != nil {
 		loger.Loger.Error("[XHH]Can't Read Body")
@@ -56,7 +57,17 @@ func Qr() {
 		loger.Loger.Error("[XHH]Can't unmarshal body")
 		return
 	}
-	code, err := qrcode.New(resps.Result.Qrcode, qrcode.Low)
+	qrURL := strings.TrimSpace(resps.Result.Qrcode)
+	if qrURL == "" {
+		loger.Loger.Error("[XHH]登录二维码为空")
+		return
+	}
+	qrLoginParts := strings.Split(qrURL, "https://api.xiaoheihe.cn/account/qr_login/?")
+	if len(qrLoginParts) != 2 {
+		loger.Loger.Error("[XHH]登录二维码地址格式异常", zap.String("qr_url", qrURL))
+		return
+	}
+	code, err := qrcode.New(qrURL, qrcode.Low)
 	if err != nil {
 		loger.Loger.Error("[XHH]无法生成二维码", zap.Error(err))
 		return
@@ -66,28 +77,41 @@ func Qr() {
 		loger.Loger.Error("[XHH]创建二维码图片失败", zap.Error(err))
 		return
 	}
+	fmt.Println("二维码图片已保存到 qrcode.png")
 	ascii := code.ToSmallString(true)
 	fmt.Println(ascii)
 	for {
 		path := "/account/qr_state/"
-		resp := SendReq("GET", path, nil, fmt.Sprintf("?%v", strings.Split(resps.Result.Qrcode, "https://api.xiaoheihe.cn/account/qr_login/?")[1]))
+		resp := SendReq("GET", path, nil, fmt.Sprintf("?%v", qrLoginParts[1]))
+		if resp == nil {
+			loger.Loger.Error("[XHH]无法查询扫码状态")
+			return
+		}
 		var resps data
 		data, err := io.ReadAll(resp.Body)
 		if err != nil {
+			_ = resp.Body.Close()
 			loger.Loger.Error("[XHH]无法读取body")
 			return
 		}
 		err = json.Unmarshal(data, &resps)
 		if err != nil {
+			_ = resp.Body.Close()
 			loger.Loger.Error("[XHH]无法反序列化")
 			return
 		}
 		fmt.Printf("\r %v | %v | %v", resps.Result.Err, resps.Result.ErrMsg, resps)
 		if resps.Result.Err != "ok" {
+			_ = resp.Body.Close()
 			time.Sleep(1 * time.Second)
 			continue
 		}
 		cookie := resp.Cookies()
+		_ = resp.Body.Close()
+		if len(cookie) < 2 {
+			loger.Loger.Error("[XHH]扫码成功但未返回完整 Cookie")
+			return
+		}
 		Info.Cookie = cookie[0].Name + "=" + cookie[0].Value + ";" + cookie[1].Name + "=" + cookie[1].Value
 		Info.Cookie += GetFuckingToken()
 		for _, v := range cookie {
