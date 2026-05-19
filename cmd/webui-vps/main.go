@@ -70,6 +70,15 @@ type logFile struct {
 	ModTime string `json:"modTime"`
 }
 
+type regenerateMessageRequest struct {
+	MsgID     int64  `json:"msgId"`
+	CommentID int64  `json:"commentId"`
+	LinkID    int64  `json:"linkId"`
+	UserID    int64  `json:"userId"`
+	UserName  string `json:"userName"`
+	Question  string `json:"question"`
+}
+
 type appConfig struct {
 	Xhh struct {
 		CheckTime                int    `json:"checkTime"`
@@ -555,15 +564,15 @@ func (s *serverState) handleRegenerateMessage(w http.ResponseWriter, r *http.Req
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	var payload struct {
-		MsgID int64 `json:"msgId"`
-	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&payload); err != nil {
+	var payload regenerateMessageRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8192)).Decode(&payload); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "请求格式错误"})
 		return
 	}
-	if payload.MsgID <= 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "消息 ID 无效"})
+	payload.UserName = strings.TrimSpace(payload.UserName)
+	payload.Question = strings.TrimSpace(payload.Question)
+	if payload.MsgID <= 0 && payload.CommentID <= 0 && payload.Question == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "缺少可回查的消息信息"})
 		return
 	}
 	cfg, _, err := s.loadConfig()
@@ -571,7 +580,7 @@ func (s *serverState) handleRegenerateMessage(w http.ResponseWriter, r *http.Req
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-	affected, err := s.markMessageUnreplied(cfg, payload.MsgID)
+	affected, err := s.markMessageUnreplied(cfg, payload)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -580,34 +589,78 @@ func (s *serverState) handleRegenerateMessage(w http.ResponseWriter, r *http.Req
 		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "未找到对应消息"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "msgId": payload.MsgID})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-func (s *serverState) markMessageUnreplied(cfg appConfig, msgID int64) (int64, error) {
+func (s *serverState) markMessageUnreplied(cfg appConfig, req regenerateMessageRequest) (int64, error) {
 	switch strings.ToLower(strings.TrimSpace(cfg.DataBase.Type)) {
 	case "", "sqlite":
-		return s.markSQLiteMessageUnreplied(msgID)
+		return s.markSQLiteMessageUnreplied(req)
 	case "pg", "postgres", "postgresql":
-		return markPostgresMessageUnreplied(cfg, msgID)
+		return markPostgresMessageUnreplied(cfg, req)
 	default:
 		return 0, fmt.Errorf("不支持的数据库类型: %s", cfg.DataBase.Type)
 	}
 }
 
-func (s *serverState) markSQLiteMessageUnreplied(msgID int64) (int64, error) {
+func (s *serverState) markSQLiteMessageUnreplied(req regenerateMessageRequest) (int64, error) {
 	database, err := sql.Open("sqlite3", filepath.Join(s.rootDir, "sql.db"))
 	if err != nil {
 		return 0, err
 	}
 	defer database.Close()
-	result, err := database.Exec("UPDATE at SET reply=? WHERE msg_id=?", false, msgID)
+	if req.MsgID > 0 {
+		affected, err := execSQLiteRegenerate(database, "msg_id=?", req.MsgID)
+		if err != nil || affected > 0 {
+			return affected, err
+		}
+	}
+	if req.CommentID > 0 {
+		affected, err := execSQLiteRegenerate(database, "comment_a_id=?", req.CommentID)
+		if err != nil || affected > 0 {
+			return affected, err
+		}
+	}
+	return markSQLiteMessageByText(database, req)
+}
+
+func execSQLiteRegenerate(database *sql.DB, where string, args ...any) (int64, error) {
+	query := "UPDATE at SET reply=? WHERE " + where
+	result, err := database.Exec(query, append([]any{false}, args...)...)
 	if err != nil {
 		return 0, err
 	}
 	return result.RowsAffected()
 }
 
-func markPostgresMessageUnreplied(cfg appConfig, msgID int64) (int64, error) {
+func markSQLiteMessageByText(database *sql.DB, req regenerateMessageRequest) (int64, error) {
+	if req.Question == "" {
+		return 0, nil
+	}
+	attempts := []struct {
+		where string
+		args  []any
+	}{
+		{"comment_text=? AND user_a_id=?", []any{req.Question, req.UserID}},
+		{"comment_text=? AND user_a_name=?", []any{req.Question, req.UserName}},
+		{"comment_text=?", []any{req.Question}},
+	}
+	for _, attempt := range attempts {
+		if strings.Contains(attempt.where, "user_a_id") && req.UserID <= 0 {
+			continue
+		}
+		if strings.Contains(attempt.where, "user_a_name") && req.UserName == "" {
+			continue
+		}
+		affected, err := execSQLiteRegenerate(database, "msg_id=(SELECT msg_id FROM at WHERE "+attempt.where+" ORDER BY msg_id DESC LIMIT 1)", attempt.args...)
+		if err != nil || affected > 0 {
+			return affected, err
+		}
+	}
+	return 0, nil
+}
+
+func markPostgresMessageUnreplied(cfg appConfig, req regenerateMessageRequest) (int64, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	pool, err := pgxpool.New(ctx, postgresDSN(cfg))
@@ -615,11 +668,54 @@ func markPostgresMessageUnreplied(cfg appConfig, msgID int64) (int64, error) {
 		return 0, err
 	}
 	defer pool.Close()
-	result, err := pool.Exec(ctx, "UPDATE at SET reply=$1 WHERE msg_id=$2", false, msgID)
+	if req.MsgID > 0 {
+		affected, err := execPostgresRegenerate(ctx, pool, "msg_id=$1", req.MsgID)
+		if err != nil || affected > 0 {
+			return affected, err
+		}
+	}
+	if req.CommentID > 0 {
+		affected, err := execPostgresRegenerate(ctx, pool, "comment_a_id=$1", req.CommentID)
+		if err != nil || affected > 0 {
+			return affected, err
+		}
+	}
+	return markPostgresMessageByText(ctx, pool, req)
+}
+
+func execPostgresRegenerate(ctx context.Context, pool *pgxpool.Pool, where string, args ...any) (int64, error) {
+	result, err := pool.Exec(ctx, "UPDATE at SET reply=false WHERE "+where, args...)
 	if err != nil {
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+func markPostgresMessageByText(ctx context.Context, pool *pgxpool.Pool, req regenerateMessageRequest) (int64, error) {
+	if req.Question == "" {
+		return 0, nil
+	}
+	attempts := []struct {
+		where string
+		args  []any
+	}{
+		{"comment_text=$1 AND user_a_id=$2", []any{req.Question, req.UserID}},
+		{"comment_text=$1 AND user_a_name=$2", []any{req.Question, req.UserName}},
+		{"comment_text=$1", []any{req.Question}},
+	}
+	for _, attempt := range attempts {
+		if strings.Contains(attempt.where, "user_a_id") && req.UserID <= 0 {
+			continue
+		}
+		if strings.Contains(attempt.where, "user_a_name") && req.UserName == "" {
+			continue
+		}
+		affected, err := execPostgresRegenerate(ctx, pool, "msg_id=(SELECT msg_id FROM at WHERE "+attempt.where+" ORDER BY msg_id DESC LIMIT 1)", attempt.args...)
+		if err != nil || affected > 0 {
+			return affected, err
+		}
+	}
+	return 0, nil
 }
 
 func postgresDSN(cfg appConfig) string {
@@ -896,7 +992,8 @@ document.querySelector('#copyLogBtn')?.addEventListener('click',()=>copyText(log
 document.querySelector('#toggleLogRefreshBtn')?.addEventListener('click',event=>{logPaused=!logPaused;if(!logPaused){clearLogLineSelection();window.getSelection()?.removeAllRanges()}event.currentTarget.textContent=logPaused?'继续刷新':'暂停刷新';if(!logPaused)loadCurrentLog()});
 
 async function action(path,text){if(appToast)appToast.textContent='';try{await api(path,{method:'POST'});if(appToast)appToast.textContent=text;setTimeout(refreshStatus,900);setTimeout(loadCurrentLog,1200)}catch(err){if(appToast)appToast.textContent=err.message}}
-async function regenerateMessage(item,button){if(!item.msgId)return;const original=button.textContent;button.disabled=true;button.textContent='处理中';if(appToast)appToast.textContent='';try{await api('/api/messages/regenerate',{method:'POST',body:JSON.stringify({msgId:item.msgId})});button.textContent='已加入';if(appToast)appToast.textContent='已加入待回复队列，机器人下一轮会重新生成'}catch(err){button.disabled=false;button.textContent=original;if(appToast)appToast.textContent=err.message}}
+async function regenerateMessage(item,button){const original=button.textContent;button.disabled=true;button.textContent='处理中';if(appToast)appToast.textContent='';try{await api('/api/messages/regenerate',{method:'POST',body:JSON.stringify(regeneratePayload(item))});button.textContent='已加入';if(appToast)appToast.textContent='已加入待回复队列，机器人下一轮会重新生成'}catch(err){button.disabled=false;button.textContent=original;if(appToast)appToast.textContent=err.message}}
+function regeneratePayload(item){return{msgId:item.msgId||0,commentId:item.commentId||0,linkId:item.linkId||0,userId:item.userId||0,userName:item.user||'',question:item.question||''}}
 async function bootstrap(){await refreshStatus();await loadConfig();await loadLogs();clearInterval(logTimer);clearInterval(statusTimer);statusTimer=setInterval(refreshStatus,4000);logTimer=setInterval(loadCurrentLog,1800)}
 
 async function refreshStatus(){try{const data=await api('/api/status');const running=data.running;const serviceState=document.querySelector('#serviceState');if(serviceState)serviceState.textContent=(data.active||'unknown')+(data.detail?' · '+data.detail:'');document.querySelector('#listenAddr').textContent=data.listenAddr||'—';document.querySelector('#rootDir').textContent=data.rootDir||'—';document.querySelector('#statusText').textContent=data.statusText||'—';document.querySelector('#metricPort').textContent=extractPort(data.listenAddr)||'29173';for(const id of ['serviceStartBtn'])document.querySelector('#'+id).disabled=running;for(const id of ['serviceStopBtn'])document.querySelector('#'+id).disabled=!running;topStatus.innerHTML='<span class="dot '+(running?'on':'')+'"></span><span>'+(running?'运行中':'待机')+'</span>'}catch(err){topStatus.innerHTML='<span class="dot"></span><span>认证失效</span>'}}
@@ -912,23 +1009,25 @@ async function loadLogs(){const data=await api('/api/logs');const files=data.fil
 async function loadCurrentLog(){if(logPaused||hasLogSelection())return;if(!currentLog){renderLog('');return}try{const data=await api('/api/logs/read?file='+encodeURIComponent(currentLog));renderLog(data.content||'')}catch(err){renderLog('日志读取失败: '+err.message)}}
 
 function renderLog(content){rawLogContent=content||'';const box=logOutput.parentElement;const scrollTop=box.scrollTop;const shouldScrollLatest=logScrollLatestOnce;logScrollLatestOnce=false;document.querySelector('#currentSource').textContent=currentLogLabel||'暂无日志源';renderLogLines(filterLogContent(rawLogContent));box.scrollTop=shouldScrollLatest?box.scrollHeight:Math.min(scrollTop,box.scrollHeight);const lines=rawLogContent?rawLogContent.split('\n').filter(Boolean):[];const interactions=dedupeInteractions(parseInteractions(lines));const completed=interactions.filter(item=>item.status==='已回复'&&item.question&&item.reply);const failed=interactions.filter(item=>isErrorStatus(item.status)&&item.question&&item.reply).length;const pending=interactions.filter(item=>item.status==='待回复'||item.status==='待重试').length;const records=interactions.filter(item=>(item.status==='已回复'||isErrorStatus(item.status))&&item.question&&item.reply);document.querySelector('#metricStatus').textContent=interactions.length;document.querySelector('#metricLines').textContent=completed.length;document.querySelector('#metricErrors').textContent=failed;document.querySelector('#metricFiles').textContent=pending;renderRecords(records.slice(-20).reverse());renderTrend(completed);renderTokenRecords(interactions.filter(item=>item.tokens))}
-function renderRecords(items){recordsBody.innerHTML='';if(!items.length){const row=document.createElement('tr');const cell=document.createElement('td');cell.colSpan=6;cell.textContent='暂无可识别的用户提问/机器人回复记录';row.appendChild(cell);recordsBody.appendChild(row);return}for(const item of items){const row=document.createElement('tr');appendCell(row,item.time);appendCell(row,item.user||'未知用户');appendCell(row,item.question,'content-cell');appendCell(row,item.reply||'—','content-cell');const statusCell=document.createElement('td');const badge=document.createElement('span');badge.className='badge '+(item.status==='已回复'?'ok':isErrorStatus(item.status)?'error':'warn');badge.textContent=item.status;statusCell.appendChild(badge);const copyBtn=document.createElement('button');copyBtn.type='button';copyBtn.className='copy-btn';copyBtn.textContent='复制';copyBtn.addEventListener('click',async()=>{await copyText(recordText(item));copyBtn.textContent='已复制';setTimeout(()=>copyBtn.textContent='复制',900)});statusCell.appendChild(copyBtn);row.appendChild(statusCell);const actionCell=document.createElement('td');if(item.msgId){const regenerateBtn=document.createElement('button');regenerateBtn.type='button';regenerateBtn.className='copy-btn';regenerateBtn.textContent='重新生成';regenerateBtn.addEventListener('click',()=>regenerateMessage(item,regenerateBtn));actionCell.appendChild(regenerateBtn)}else{actionCell.textContent='—'}row.appendChild(actionCell);recordsBody.appendChild(row)}}
+function renderRecords(items){recordsBody.innerHTML='';if(!items.length){const row=document.createElement('tr');const cell=document.createElement('td');cell.colSpan=6;cell.textContent='暂无可识别的用户提问/机器人回复记录';row.appendChild(cell);recordsBody.appendChild(row);return}for(const item of items){const row=document.createElement('tr');appendCell(row,item.time);appendCell(row,item.user||'未知用户');appendCell(row,item.question,'content-cell');appendCell(row,item.reply||'—','content-cell');const statusCell=document.createElement('td');const badge=document.createElement('span');badge.className='badge '+(item.status==='已回复'?'ok':isErrorStatus(item.status)?'error':'warn');badge.textContent=item.status;statusCell.appendChild(badge);const copyBtn=document.createElement('button');copyBtn.type='button';copyBtn.className='copy-btn';copyBtn.textContent='复制';copyBtn.addEventListener('click',async()=>{await copyText(recordText(item));copyBtn.textContent='已复制';setTimeout(()=>copyBtn.textContent='复制',900)});statusCell.appendChild(copyBtn);row.appendChild(statusCell);const actionCell=document.createElement('td');const regenerateBtn=document.createElement('button');regenerateBtn.type='button';regenerateBtn.className='copy-btn';regenerateBtn.textContent='重新生成';regenerateBtn.addEventListener('click',()=>regenerateMessage(item,regenerateBtn));actionCell.appendChild(regenerateBtn);row.appendChild(actionCell);recordsBody.appendChild(row)}}
 function renderLogLines(content){const selectedLines=selectedLogLineIndexes();logOutput.innerHTML='';logOutput.dataset.raw=content||'';logOutput.classList.toggle('empty',!content);if(!content){logOutput.textContent='暂无日志。';lastSelectedLogLine=-1;return}content.split('\n').forEach((line,index)=>{const item=document.createElement('span');item.className='log-line';item.dataset.index=String(index);item.textContent=line||' ';item.title='点击选择这一行，Shift 点击选择范围，再点复制选中';item.classList.toggle('selected',selectedLines.has(index));item.addEventListener('click',event=>toggleLogLineSelection(index,event.shiftKey));logOutput.appendChild(item)})}
 function rerenderCurrentLog(){clearLogLineSelection();window.getSelection()?.removeAllRanges();renderLog(rawLogContent)}
 function filterLogContent(content){if(!content)return'';const mode=logFilter?.value||'all';const keyword=(logKeyword?.value||'').trim().toLowerCase();return content.split('\n').filter(line=>matchesLogFilter(line,mode)&&(!keyword||line.toLowerCase().includes(keyword))).join('\n')}
 function matchesLogFilter(line,mode){switch(mode){case'error':return isFailureLine(line);case'ask':return line.includes('[Ai]正在询问Ai');case'reply':return line.includes('[Ai]Ai说：');case'image':return /图片|生图|画图|生成图片|image|upload|imgs/i.test(line);default:return true}}
 function appendCell(row,text,className){const cell=document.createElement('td');if(className){cell.className=className;const inner=document.createElement('div');inner.className='clip-cell';inner.textContent=text||'—';cell.appendChild(inner)}else{cell.textContent=text||'—'}row.appendChild(cell)}
 function renderTokenRecords(items){const totalEl=document.querySelector('#tokenTotal');const hourEl=document.querySelector('#tokenHour');const dayEl=document.querySelector('#tokenDay');const now=Date.now();let total=0;let hour=0;let day=0;for(const item of items){if(!item.tokens)continue;total+=item.tokens;const time=parseItemTime(item.time);if(!time)continue;const age=now-time.getTime();if(age>=0&&age<=3600000)hour+=item.tokens;if(age>=0&&age<=86400000)day+=item.tokens}if(totalEl)totalEl.textContent=formatCount(total);if(hourEl)hourEl.textContent=formatCount(hour);if(dayEl)dayEl.textContent=formatCount(day)}
-function parseInteractions(lines){const items=[];let pending=null;let lastAnswered=null;let currentMessage=null;for(const line of lines){if(line.includes('[XHH]正在处理@消息')){currentMessage=parseProcessingLine(line);continue}if(line.includes('[Ai]正在询问Ai')){const next=attachMessageContext(parseQuestionLine(line),currentMessage);if(pending&&pending.question){if(sameInteraction(pending,next))continue;items.push(finalizePending(pending))}pending=next;continue}if(line.includes('[Ai]Ai说：')){if(!pending||!pending.question){pending=null;continue}pending.reply=extractJsonField(line,'text')||stripLogPrefix(line);pending.tokens=extractToken(line);pending.status='已回复';items.push(pending);lastAnswered=pending;pending=null;continue}if(isSendAnomalyLine(line)&&lastAnswered&&lastAnswered.status==='已回复'){lastAnswered.status='异常发送';lastAnswered.lastError=stripLogPrefix(line);continue}if(isFailureLine(line)&&pending&&pending.question&&!pending.lastError){pending.lastError=stripLogPrefix(line);pending.status='待重试'}}if(pending&&pending.question)items.push(finalizePending(pending));return items}
+function parseInteractions(lines){const items=[];let pending=null;let lastAnswered=null;let currentMessage=null;for(const line of lines){if(line.includes('[XHH]正在处理@消息')){currentMessage=parseProcessingLine(line);continue}if(line.includes('[Ai]正在询问Ai')){const next=attachMessageContext(parseQuestionLine(line),currentMessage);if(pending&&pending.question){if(sameInteraction(pending,next))continue;items.push(finalizePending(pending))}pending=next;continue}if(line.includes('[Ai]Ai说：')){if(!pending||!pending.question){pending=null;continue}pending.reply=extractJsonField(line,'text')||stripLogPrefix(line);pending.tokens=extractToken(line);pending.status='已回复';items.push(pending);lastAnswered=pending;pending=null;continue}if(isSendAnomalyLine(line)&&lastAnswered&&lastAnswered.status==='已回复'){attachMessageContext(lastAnswered,parseAnomalyLine(line));lastAnswered.status='异常发送';lastAnswered.lastError=stripLogPrefix(line);continue}if(isFailureLine(line)&&pending&&pending.question&&!pending.lastError){pending.lastError=stripLogPrefix(line);pending.status='待重试'}}if(pending&&pending.question)items.push(finalizePending(pending));return items}
 function dedupeInteractions(items){const result=[];for(const item of items){const last=result[result.length-1];if(last&&sameInteraction(last,item)){if(last.status==='失败'&&item.status==='已回复'){result[result.length-1]=item;continue}if(last.status===item.status){last.msgId=item.msgId||last.msgId;last.reply=item.reply||last.reply;last.tokens=item.tokens||last.tokens;last.time=item.time||last.time;continue}}result.push(item)}return result}
-function sameInteraction(a,b){if(a?.msgId&&b?.msgId&&a.msgId!==b.msgId)return false;return normalizeText(a?.user)===normalizeText(b?.user)&&normalizeText(a?.question)===normalizeText(b?.question)}
+function sameInteraction(a,b){if(a?.msgId&&b?.msgId&&a.msgId!==b.msgId)return false;if(a?.commentId&&b?.commentId&&a.commentId!==b.commentId)return false;return normalizeText(a?.user)===normalizeText(b?.user)&&normalizeText(a?.question)===normalizeText(b?.question)}
 function finalizePending(item){if(item.status==='待重试'||item.lastError){item.reply=item.lastError||item.reply||'AI 回复失败';item.status='失败'}return item}
 function isErrorStatus(status){return status==='失败'||status==='异常发送'}
-function attachMessageContext(item,context){if(!context)return item;if(context.msgId)item.msgId=context.msgId;if((!item.user||item.user==='未知用户')&&context.user)item.user=context.user;if(!item.question&&context.question)item.question=context.question;if((!item.time||item.time==='—')&&context.time)item.time=context.time;return item}
-function parseProcessingLine(line){const obj=parseZapJSON(line);if(!obj)return null;const msgId=Number(obj.msg_id??obj.msgId??obj.message_id??0);return{msgId:Number.isFinite(msgId)?msgId:0,user:cleanText(obj.user_name||obj.user||''),question:cleanText(obj.text||''),time:extractTime(line)}}
+function attachMessageContext(item,context){if(!context)return item;if(context.msgId)item.msgId=context.msgId;if(context.commentId)item.commentId=context.commentId;if(context.linkId)item.linkId=context.linkId;if(context.userId)item.userId=context.userId;if((!item.user||item.user==='未知用户')&&context.user)item.user=context.user;if(!item.question&&context.question)item.question=context.question;if((!item.time||item.time==='—')&&context.time)item.time=context.time;return item}
+function parseProcessingLine(line){const obj=parseZapJSON(line);if(!obj)return null;return{msgId:numberField(obj,'msg_id','msgId','message_id'),commentId:numberField(obj,'comment_id','commentId','reply_id'),linkId:numberField(obj,'link_id','linkId'),userId:numberField(obj,'user_id','userId','userid'),user:cleanText(obj.user_name||obj.user||''),question:cleanText(obj.text||''),time:extractTime(line)}}
+function parseAnomalyLine(line){const obj=parseZapJSON(line);if(!obj)return null;return{commentId:numberField(obj,'reply_id','comment_id','commentId'),linkId:numberField(obj,'link_id','linkId'),time:extractTime(line)}}
 function parseQuestionLine(line){const content=extractContentArray(line);const userQuestion=extractUserQuestion(content);return{time:extractTime(line),user:userQuestion.user,question:userQuestion.question,reply:'',status:'待回复'}}
 function extractUserQuestion(content){const candidates=[];for(const item of content){const text=item&&item.text;if(!text||!/评论.*上下文/.test(text))continue;for(const line of text.split('\n')){const parsed=parseContextLine(line);if(parsed)candidates.push(parsed)}}if(!candidates.length)return{user:'未知用户',question:''};const mentioned=[...candidates].reverse().find(item=>item.text.includes('@'));const picked=mentioned||candidates[candidates.length-1];return{user:picked.user||'未知用户',question:picked.text||''}}
 function extractContentArray(line){const obj=parseZapJSON(line);if(obj&&Array.isArray(obj.Content))return obj.Content;return[]}
+function numberField(obj,...fields){for(const field of fields){const value=Number(obj?.[field]??0);if(Number.isFinite(value)&&value>0)return value}return 0}
 function parseZapJSON(line){const start=line.indexOf('{');if(start<0)return null;try{return JSON.parse(line.slice(start))}catch(err){return null}}
 function extractQuestion(content){for(let i=content.length-1;i>=0;i--){const text=content[i]&&content[i].text;if(!text)continue;const index=text.lastIndexOf('以上是帖子内容。');if(index>=0)return cleanText(text.slice(index+'以上是帖子内容。'.length));}return''}
 function extractUserFromContent(content,question){let fallback='未知用户';const plainQuestion=normalizeText(question).replace(/^@[^\s]+/,'');for(const item of content){const text=item&&item.text;if(!text)continue;const body=text.split('\n');for(const line of body){const parsed=parseContextLine(line);if(!parsed)continue;fallback=parsed.user;if(plainQuestion&&normalizeText(parsed.text).includes(plainQuestion))return parsed.user}}return fallback}
@@ -939,7 +1038,7 @@ function isSendAnomalyLine(line){return /异常发送|因为无法评论|评论�
 function isFailureLine(line){return /Ai返回错误|无法回复评论|评论发送失败|图片评论处理失败|无法整理@消息|comment\/create image reply failed|error|failed|panic|fatal|错误|失败|异常/i.test(line)&&!line.includes('[Ai]正在询问Ai')}
 function extractTime(line){const match=line.match(/(20\d{2}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2}:\d{2}))?/);return match?match[1]+(match[2]?' '+match[2]:''):'—'}
 function stripLogPrefix(line){return cleanText(line.replace(/^.*?\]\s*/,''))}
-function recordText(item){const lines=['时间：'+(item.time||'—'),'用户：'+(item.user||'未知用户'),'用户说：'+(item.question||'—'),'机器人回复：'+(item.reply||'—'),'状态：'+(item.status||'—')];if(item.msgId)lines.push('消息ID：'+item.msgId);return lines.join('\n')}
+function recordText(item){const lines=['时间：'+(item.time||'—'),'用户：'+(item.user||'未知用户'),'用户说：'+(item.question||'—'),'机器人回复：'+(item.reply||'—'),'状态：'+(item.status||'—')];if(item.msgId)lines.push('消息ID：'+item.msgId);if(item.commentId)lines.push('评论ID：'+item.commentId);return lines.join('\n')}
 function selectedLogLineIndexes(){return new Set([...logOutput.querySelectorAll('.log-line.selected')].map(line=>Number(line.dataset.index)))}
 function selectedLogLineText(){const selected=[...logOutput.querySelectorAll('.log-line.selected')];if(!selected.length)return'';selected.sort((a,b)=>Number(a.dataset.index)-Number(b.dataset.index));return selected.map(line=>line.textContent).join('\n')}
 function toggleLogLineSelection(index,range){const lines=[...logOutput.querySelectorAll('.log-line')];if(range&&lastSelectedLogLine>=0){const start=Math.min(lastSelectedLogLine,index);const end=Math.max(lastSelectedLogLine,index);for(let i=start;i<=end;i++)lines[i]?.classList.add('selected')}else{lines[index]?.classList.toggle('selected');lastSelectedLogLine=index}if(selectedLogLineIndexes().size>0)logPaused=true;const button=document.querySelector('#toggleLogRefreshBtn');if(button)button.textContent=logPaused?'继续刷新':'暂停刷新'}
