@@ -69,11 +69,25 @@ func TestParseImageCommand(t *testing.T) {
 			wantPostContext: true,
 		},
 		{
+			name:            "article context and xhh emoji cleanup",
+			text:            "@机器人 根据文章内容生成一张图片，祝楼主发财喵[cube_喜欢]",
+			wantOK:          true,
+			wantPrompt:      "祝楼主发财喵",
+			wantPostContext: true,
+		},
+		{
 			name:           "comment context",
 			text:           "@机器人 根据评论区内容生成一张海报",
 			wantOK:         true,
 			wantPrompt:     "海报",
 			wantCommentCtx: true,
+		},
+		{
+			name:            "middle robot mention keeps whole comment",
+			text:            "这个中转站看起来挺赚钱的，@机器人 根据文章内容生成一张图，祝楼主发财",
+			wantOK:          true,
+			wantPrompt:      "祝楼主发财",
+			wantPostContext: true,
 		},
 		{
 			name:           "image input flag",
@@ -129,5 +143,13 @@ func TestExtractImagePromptCompatibility(t *testing.T) {
 	}
 	if prompt != "机械朋克猫" {
 		t.Fatalf("prompt = %q, want %q", prompt, "机械朋克猫")
+	}
+}
+
+func TestNormalizeCommentText(t *testing.T) {
+	got := NormalizeCommentText(`<a data-user-id="1">@小猫娘喵喵</a> 这个中转站看起来挺赚钱的，@机器人 根据文章内容生成一张图 [cube_喜欢]`)
+	want := "@小猫娘喵喵 这个中转站看起来挺赚钱的，@机器人 根据文章内容生成一张图"
+	if got != want {
+		t.Fatalf("NormalizeCommentText = %q, want %q", got, want)
 	}
 }

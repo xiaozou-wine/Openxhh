@@ -40,7 +40,7 @@ func GetAiReply(Contents []Content, UserSay string, Topics []Topics, Tags []Tags
 	//用户
 	UMsg.Role = "user"
 	var UserContent Content
-	UserContent.Text = "以上是帖子内容。" + UserSay
+	UserContent.Text = "以上是帖子内容。\n用户整条评论：" + UserSay + "\n请结合整条评论理解用户意图；评论中的机器人 @ 只是唤醒标记，可能出现在开头、中间或结尾，不要把它当作问题起点。"
 	UserContent.Type = "text"
 	Contents = append(Contents, UserContent)
 	UMsg.Content = Contents

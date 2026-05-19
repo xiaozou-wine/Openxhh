@@ -18,13 +18,14 @@ type ImageCommand struct {
 
 var htmlTagPattern = regexp.MustCompile(`<[^>]*>`)
 var leadingMentionPattern = regexp.MustCompile(`^\s*(?:@\S+\s*)+`)
+var leadingImageObjectPattern = regexp.MustCompile(`^\s*(?:图片|图像|图)\s*[，,。:：、\s]+`)
 var imageWeakTriggerPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?:帮我|请|可以|能不能)?\s*(生成|画|来|做|出)\s*(一张|一幅|一个|一只|一位|张|幅|个|只|位)\s*(.+)`),
 	regexp.MustCompile(`(?:帮我|请|可以|能不能)?\s*(画|生成)\s*(.+)`),
 }
 var mentionControlPattern = regexp.MustCompile(`(?:并|，|,|。|、|\s)*(?:顺便|帮我|请|可以|能不能)?(?:艾特|提到|喊|叫)\s*(?:她|他|ta|TA|@?[^\s，,。.!！?？:：、@]{1,24})?(?:看看|查看|看下|来看|评价|一下)?`)
 var atControlPattern = regexp.MustCompile(`(?:并|，|,|。|、|\s)*(?:顺便|帮我|请|可以|能不能)\s*@[^\s，,。.!！?？:：、@]{1,24}(?:看看|查看|看下|来看|评价|一下)?`)
-var contextControlPattern = regexp.MustCompile(`(?:根据|基于|按照|按)(?:这个|本)?(?:正文|帖子|原帖|评论区|评论|楼里|楼上)(?:内容)?`)
+var contextControlPattern = regexp.MustCompile(`(?:根据|基于|按照|按)(?:这个|这篇|这条|本条|当前|该|本)?(?:正文|文章|帖子|原帖|评论区|评论|楼里|楼上)(?:内容)?`)
 var imageInputControlPattern = regexp.MustCompile(`(?:参考|按照|按|基于)?(?:这张图|这个图|图片|原图|评论里的图|楼里的图)|图生图|改图`)
 var pronounMentionPattern = regexp.MustCompile(`(?:艾特|提到|喊|叫)\s*(她|他|ta|TA)`)
 var portraitSubjectPatterns = []*regexp.Regexp{
@@ -63,9 +64,15 @@ func ParseImageCommand(text string) (ImageCommand, bool) {
 	return command, true
 }
 
-func normalizeImageCommandText(text string) string {
+func NormalizeCommentText(text string) string {
 	cleaned := html.UnescapeString(htmlTagPattern.ReplaceAllString(text, " "))
-	cleaned = strings.TrimSpace(cleaned)
+	cleaned = xhhEmojiPattern.ReplaceAllString(cleaned, "")
+	cleaned = strings.Join(strings.Fields(cleaned), " ")
+	return strings.TrimSpace(cleaned)
+}
+
+func normalizeImageCommandText(text string) string {
+	cleaned := NormalizeCommentText(text)
 	cleaned = leadingMentionPattern.ReplaceAllString(cleaned, "")
 	return strings.TrimSpace(cleaned)
 }
@@ -119,17 +126,20 @@ func looksLikeImageIntent(text string, prompt string) bool {
 
 func cleanupImagePrompt(prompt string) string {
 	cleaned := prompt
+	cleaned = xhhEmojiPattern.ReplaceAllString(cleaned, "")
 	cleaned = contextControlPattern.ReplaceAllString(cleaned, "")
 	cleaned = imageInputControlPattern.ReplaceAllString(cleaned, "")
 	cleaned = mentionControlPattern.ReplaceAllString(cleaned, "")
 	cleaned = atControlPattern.ReplaceAllString(cleaned, "")
+	cleaned = strings.TrimLeft(cleaned, "：:，,。.!！、 ")
+	cleaned = leadingImageObjectPattern.ReplaceAllString(cleaned, "")
 	cleaned = strings.TrimLeft(cleaned, "：:，,。.!！、 ")
 	cleaned = strings.TrimSpace(cleaned)
 	return cleaned
 }
 
 func wantsPostContext(text string) bool {
-	triggers := []string{"根据正文", "根据帖子", "根据原帖", "基于正文", "基于帖子", "按这个帖子", "按照这个帖子"}
+	triggers := []string{"根据正文", "根据文章", "根据文章内容", "根据帖子", "根据原帖", "基于正文", "基于文章", "基于帖子", "按这个帖子", "按照这个帖子", "按这篇文章", "按照这篇文章"}
 	for _, trigger := range triggers {
 		if strings.Contains(text, trigger) {
 			return true
@@ -139,7 +149,7 @@ func wantsPostContext(text string) bool {
 }
 
 func wantsCommentContext(text string) bool {
-	triggers := []string{"根据评论区", "根据评论", "根据楼里", "根据楼上", "基于评论区", "按评论区", "按照评论区"}
+	triggers := []string{"根据评论区", "根据评论", "根据这条评论", "根据本条评论", "根据当前评论", "根据楼里", "根据楼上", "基于评论区", "基于评论", "按评论区", "按照评论区"}
 	for _, trigger := range triggers {
 		if strings.Contains(text, trigger) {
 			return true

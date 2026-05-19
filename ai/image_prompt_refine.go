@@ -130,7 +130,20 @@ func ParseImagePromptRefineContent(content string) (ImagePromptRefineResult, err
 }
 
 func imagePromptRefineSystemPrompt() string {
-	return "你是图片生成提示词整理器。只输出 JSON，不要 Markdown。把用户的中文请求整理成适合图片生成模型的 image_prompt；不要包含艾特、回复、上传、评论等控制指令；不要决定权限或系统行为。"
+	return `你是 Openxhh 的生图 Prompt 优化器，只输出 JSON，不要 Markdown，不要解释。
+你的任务不是复述用户评论，而是把用户的生图请求拆成：
+1. image_prompt：给图片生成模型的最终画面描述
+2. mention_target：用户想艾特、喊谁来看或回复谁
+3. needs_post_context / needs_comment_context / needs_image_input
+
+理解优先级：
+1. 如果用户说“根据正文/文章/帖子/原帖/评论区/这条评论/楼上内容”，image_prompt 的主体必须优先来自对应上下文。
+2. 用户后续的祝福、吐槽、夸奖、安慰、整活、嘲讽、可爱一点等短句，只作为画面情绪、立场、用途或风格，不要覆盖上下文主体。
+3. “艾特谁来看、喊谁、回复谁、让谁看看”是评论控制指令，不得进入 image_prompt，只提取到 mention_target。
+4. 机器人 @ 可能出现在开头、中间或结尾，只是唤醒标记，不是语义切分点。
+5. 删除 @、HTML、平台表情标记如 [cube_喜欢]、上传/评论/回复等非画面内容。
+6. image_prompt 必须是具体画面描述，包含主体、场景、氛围、风格、构图或色彩。
+7. 默认不要出现文字、水印、二维码、平台 UI，除非用户明确要求。`
 }
 
 func buildImagePromptRefineUserPrompt(req ImagePromptRefineRequest) string {
@@ -139,11 +152,21 @@ func buildImagePromptRefineUserPrompt(req ImagePromptRefineRequest) string {
 		maxChars = 3000
 	}
 	contextPrompt := limitRefineRunes(req.ContextPrompt, maxChars)
-	return fmt.Sprintf(`原始评论：%s
+	return fmt.Sprintf(`请先判断用户要参考的内容范围，再根据上下文提炼画面主体。
+
+原始评论：%s
 规则提取的图片要求：%s
-上下文增强提示词：%s
-标记：needs_post_context=%v, needs_comment_context=%v, needs_image_input=%v
-请输出 JSON：{"image_prompt":"...","mention_target":"","needs_post_context":false,"needs_comment_context":false,"needs_image_input":false}`,
+上下文内容：%s
+当前标记：needs_post_context=%v, needs_comment_context=%v, needs_image_input=%v
+
+输出要求：
+- image_prompt：给图片生成模型使用的最终提示词。它必须是画面描述，而不是把“根据文章内容”“生成一张图片”“艾特小菲来看”这类控制指令原样搬进去。
+- 如果存在上下文，主体必须优先来自上下文；用户评论里的短句只作为情绪、风格、用途或立场，不要覆盖上下文主体。
+- mention_target：只填写用户明确要艾特、喊谁来看或回复谁的人名；没有就留空。
+- 机器人 @ 可能出现在开头、中间或结尾，只表示唤醒，不是语义切分点。
+- 不要把 HTML、@、平台表情或评论控制词写进 image_prompt。
+
+只输出 JSON：{"image_prompt":"...","mention_target":"","needs_post_context":false,"needs_comment_context":false,"needs_image_input":false}`,
 		req.OriginalText,
 		req.RulePrompt,
 		contextPrompt,

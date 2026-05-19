@@ -307,10 +307,11 @@ func replyComment(v db.CommStruct) {
 		return
 	}
 
-	loger.Loger.Info("[XHH]正在处理@消息", zap.Int("msg_id", v.MsgID), zap.Int("comment_id", v.CommentID), zap.Int("link_id", v.LinkID), zap.Int("user_id", v.Uid), zap.String("user_name", v.UserName), zap.String("text", v.Text))
+	userText := NormalizeCommentText(v.Text)
+	loger.Loger.Info("[XHH]正在处理@消息", zap.Int("msg_id", v.MsgID), zap.Int("comment_id", v.CommentID), zap.Int("link_id", v.LinkID), zap.Int("user_id", v.Uid), zap.String("user_name", v.UserName), zap.String("text", userText), zap.String("raw_text", v.Text))
 
 	var isok bool
-	handledImage, imageOK := HandleImageGenerationComment(v.LinkID, v.CommentID, v.RootID, v.Uid, v.UserName, v.Text)
+	handledImage, imageOK := HandleImageGenerationComment(v.LinkID, v.CommentID, v.RootID, v.Uid, v.UserName, userText)
 	if handledImage {
 		isok = imageOK
 	} else {
@@ -321,16 +322,16 @@ func replyComment(v db.CommStruct) {
 			return
 		}
 		Info = appendOwnerContext(Info, v.Uid)
-		mentionTrigger := ShouldMentionTarget(v.Text)
+		mentionTrigger := ShouldMentionTarget(userText)
 		mentionTarget := mention != "" && mentionTrigger
 		loger.Loger.Info("[XHH]Mention decision", zap.Bool("trigger", mentionTrigger), zap.Bool("hasMention", mention != ""))
-		ReplyText := ai.GetAiReply(Info, v.Text, top, tags, zap.Int("msg_id", v.MsgID), zap.Int("comment_id", v.CommentID), zap.Int("link_id", v.LinkID), zap.Int("user_id", v.Uid), zap.String("user_name", v.UserName), zap.String("question", v.Text))
+		ReplyText := ai.GetAiReply(Info, userText, top, tags, zap.Int("msg_id", v.MsgID), zap.Int("comment_id", v.CommentID), zap.Int("link_id", v.LinkID), zap.Int("user_id", v.Uid), zap.String("user_name", v.UserName), zap.String("question", userText), zap.String("raw_question", v.Text))
 		if ReplyText == "" {
 			loger.Loger.Info("[XHH]Ai返回错误")
 			IsErr()
 			return
 		}
-		explicitMention := GetExplicitMentionFromPost(v.LinkID, v.Text, v.Uid)
+		explicitMention := GetExplicitMentionFromPost(v.LinkID, userText, v.Uid)
 		if explicitMention != "" {
 			ReplyText = explicitMention + " " + ReplyText
 		} else if mentionTarget {
