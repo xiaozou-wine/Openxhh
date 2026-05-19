@@ -905,7 +905,9 @@ func (s *serverState) handleRecords(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	content, sources, err := s.readRecordLogs()
+	window := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("window")))
+	recentOnly := window == "24h" || window == "recent"
+	content, sources, err := s.readRecordLogs(recentOnly)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": content})
 		return
@@ -914,15 +916,29 @@ func (s *serverState) handleRecords(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "content": content, "sources": sources, "tokens": tokens})
 }
 
-func (s *serverState) readRecordLogs() (string, int, error) {
+func (s *serverState) readRecordLogs(recentOnly bool) (string, int, error) {
 	logFiles, _ := listLogFiles(filepath.Join(s.rootDir, "log"))
 	if len(logFiles) > 0 {
 		sort.Slice(logFiles, func(i, j int) bool {
 			return logFiles[i].ModTime < logFiles[j].ModTime
 		})
 		parts := make([]string, 0, len(logFiles))
+		cutoff := time.Now().Add(-24 * time.Hour)
 		for _, file := range logFiles {
-			content, err := readWholeFile(filepath.Join(s.rootDir, "log", file.Name))
+			if recentOnly {
+				modTime, err := time.ParseInLocation("2006-01-02 15:04:05", file.ModTime, time.Local)
+				if err == nil && modTime.Before(cutoff) {
+					continue
+				}
+			}
+			path := filepath.Join(s.rootDir, "log", file.Name)
+			var content string
+			var err error
+			if recentOnly {
+				content, err = readRecentLogFile(path, cutoff)
+			} else {
+				content, err = readWholeFile(path)
+			}
 			if err != nil || strings.TrimSpace(content) == "" {
 				continue
 			}
@@ -932,11 +948,58 @@ func (s *serverState) readRecordLogs() (string, int, error) {
 			return strings.Join(parts, "\n"), len(parts), nil
 		}
 	}
+	if recentOnly {
+		content, err := s.readJournalSince(time.Now().Add(-24 * time.Hour))
+		if err != nil {
+			return content, 0, err
+		}
+		return content, 1, nil
+	}
 	content, err := s.readJournalAll()
 	if err != nil {
 		return content, 0, err
 	}
 	return content, 1, nil
+}
+
+func readRecentLogFile(path string, cutoff time.Time) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	var lines []string
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		timeValue, ok := parseLogLineTime(line)
+		if !ok || timeValue.Before(cutoff) {
+			continue
+		}
+		lines = append(lines, line)
+	}
+	if err := scanner.Err(); err != nil {
+		return "", err
+	}
+	return strings.Join(lines, "\n"), nil
+}
+
+func parseLogLineTime(line string) (time.Time, bool) {
+	value := timeFromLogLine(line)
+	if value == "" {
+		return time.Time{}, false
+	}
+	layout := "2006-01-02"
+	if strings.Contains(value, " ") {
+		layout = "2006-01-02 15:04:05"
+	}
+	parsed, err := time.ParseInLocation(layout, value, time.Local)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return parsed, true
 }
 
 func readWholeFile(path string) (string, error) {
@@ -1127,7 +1190,16 @@ func (s *serverState) readJournal() (string, error) {
 }
 
 func (s *serverState) readJournalAll() (string, error) {
-	cmd := exec.Command("journalctl", "-u", s.service, "--no-pager", "-o", "short-iso")
+	return s.readJournalSince(time.Time{})
+}
+
+func (s *serverState) readJournalSince(since time.Time) (string, error) {
+	args := []string{"-u", s.service}
+	if !since.IsZero() {
+		args = append(args, "--since", since.Format("2006-01-02 15:04:05"))
+	}
+	args = append(args, "--no-pager", "-o", "short-iso")
+	cmd := exec.Command("journalctl", args...)
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
@@ -1256,7 +1328,7 @@ const indexHTML = `<!doctype html>
       <div class="layout">
         <aside class="side">
           <button class="new-chat" data-view-button="home">主控首页</button>
-          <button class="side-link" data-view-button="records" type="button">全部聊天记录</button>
+          <button class="side-link" data-view-button="records" type="button">最近24小时聊天记录</button>
           <div class="side-card"><strong>猫娘面板</strong><p>主控台放首页，聊天记录可从左侧单独查看。</p></div>
           <div class="side-card service-card"><strong>当前服务</strong><p>{{.Service}}</p></div>
         </aside>
@@ -1268,8 +1340,8 @@ const indexHTML = `<!doctype html>
           </section>
 
           <section class="view" id="view-records">
-            <div class="hero-card"><div class="hero-head"><div class="hero-title"><h1>聊天记录</h1><p id="recordsMeta">正在读取所有聊天记录...</p></div><div class="panel-actions"><button id="recordsRefreshBtn" class="secondary" type="button">刷新记录</button><button class="secondary" data-view-button="home" type="button">返回主控台</button></div></div><div id="recordsToast" class="toast"></div></div>
-            <section class="card records"><div class="panel-head"><div><h2>全部对话</h2><p>按顺序配对“小黑盒用户提问”和“机器人回复”，失败和异常发送会单独标记。</p></div></div><div class="table-wrap"><table><thead><tr><th>时间</th><th>用户</th><th>用户说</th><th>机器人回复</th><th>状态</th><th>帖子</th><th>操作</th></tr></thead><tbody id="recordsBody"><tr><td colspan="7">等待日志...</td></tr></tbody></table></div></section>
+            <div class="hero-card"><div class="hero-head"><div class="hero-title"><h1>聊天记录</h1><p id="recordsMeta">正在读取最近24小时聊天记录...</p></div><div class="panel-actions"><button id="recordsRefreshBtn" class="secondary" type="button">刷新记录</button><button class="secondary" data-view-button="home" type="button">返回主控台</button></div></div><div id="recordsToast" class="toast"></div></div>
+            <section class="card records"><div class="panel-head"><div><h2>最近24小时对话</h2><p>按顺序配对最近 24 小时内的“小黑盒用户提问”和“机器人回复”，失败和异常发送会单独标记。</p></div></div><div class="table-wrap"><table><thead><tr><th>时间</th><th>用户</th><th>用户说</th><th>机器人回复</th><th>状态</th><th>帖子</th><th>操作</th></tr></thead><tbody id="recordsBody"><tr><td colspan="7">等待日志...</td></tr></tbody></table></div></section>
           </section>
 
           <section class="view" id="view-logs"><div class="card log-panel"><div class="log-head"><div><h2>日志管理</h2><p id="currentSource">等待日志源...</p></div><div class="log-tools"><div class="log-filterbar"><select id="logSelect"></select><select id="logFilter"><option value="all">全部</option><option value="error">只看报错</option><option value="ask">用户提问</option><option value="reply">AI 回复</option><option value="image">图片/生图</option></select><input id="logKeyword" class="input" type="search" placeholder="关键词筛选"></div><div class="log-buttonbar"><button id="copySelectedLogBtn" class="copy-btn" type="button">复制选中</button><button id="copyLogBtn" class="copy-btn" type="button">复制全部</button><button id="toggleLogRefreshBtn" class="copy-btn" type="button">暂停刷新</button></div></div></div><div class="terminal"><pre id="logOutput" class="empty" tabindex="0">等待日志...</pre></div></div></section>
@@ -1317,7 +1389,7 @@ const recordScrollMemory=new Map();
 
 function showApp(ok){loginView.classList.toggle('hidden',ok);appView.classList.toggle('hidden',!ok);if(ok){switchView('home');bootstrap()}}
 async function api(path,options={}){const res=await fetch(path,{headers:{'Content-Type':'application/json'},credentials:'same-origin',...options});const data=await res.json().catch(()=>({}));if(!res.ok)throw new Error(data.error||'请求失败');return data}
-function switchView(name){const previous=activeView;activeView=name;document.querySelectorAll('.view').forEach(view=>view.classList.toggle('active',view.id==='view-'+name));document.querySelectorAll('.nav').forEach(btn=>btn.classList.toggle('active',btn.dataset.view===name));document.querySelector('#adminMenuBtn')?.classList.toggle('active',name==='settings');const mobile=document.querySelector('#mobileNav');if(mobile&&name!=='settings')mobile.value=name;if(name==='logs'&&previous!=='logs'){logScrollLatestOnce=true;loadCurrentLog()}if(name==='records')loadAllRecords()}
+function switchView(name){const previous=activeView;activeView=name;document.querySelectorAll('.view').forEach(view=>view.classList.toggle('active',view.id==='view-'+name));document.querySelectorAll('.nav').forEach(btn=>btn.classList.toggle('active',btn.dataset.view===name));document.querySelector('#adminMenuBtn')?.classList.toggle('active',name==='settings');const mobile=document.querySelector('#mobileNav');if(mobile&&name!=='settings')mobile.value=name;if(name==='logs'&&previous!=='logs'){logScrollLatestOnce=true;loadCurrentLog()}if(name==='records'){if(recordsMeta)recordsMeta.textContent='正在读取最近24小时聊天记录...';loadAllRecords()}}
 document.querySelectorAll('[data-view], [data-view-button]').forEach(el=>el.addEventListener('click',()=>switchView(el.dataset.view||el.dataset.viewButton)));
 document.querySelector('#adminMenuBtn')?.addEventListener('click',()=>switchView('settings'));
 document.querySelector('#settingsHomeBtn')?.addEventListener('click',()=>switchView('home'));
@@ -1358,8 +1430,38 @@ async function loadLogs(){const data=await api('/api/logs');const files=data.fil
 async function loadCurrentLog(){if(logPaused||hasLogSelection())return;if(!currentLog){renderLog('');return}try{const data=await api('/api/logs/read?file='+encodeURIComponent(currentLog));renderLog(data.content||'')}catch(err){renderLog('日志读取失败: '+err.message)}}
 
 function renderLog(content){rawLogContent=content||'';const box=logOutput.parentElement;const scrollTop=box.scrollTop;const shouldScrollLatest=logScrollLatestOnce;logScrollLatestOnce=false;document.querySelector('#currentSource').textContent=currentLogLabel||'暂无日志源';renderLogLines(filterLogContent(rawLogContent));box.scrollTop=shouldScrollLatest?box.scrollHeight:Math.min(scrollTop,box.scrollHeight)}
-async function loadAllRecords(manual=false){if(!manual&&activeView!=='home'&&activeView!=='records')return;if(manual&&recordsToast)recordsToast.textContent='正在刷新所有记录...';try{const data=await api('/api/records');const lines=(data.content||'').split('\n').filter(Boolean);const interactions=dedupeInteractions(parseInteractions(lines));const completed=interactions.filter(item=>item.status==='已回复'&&item.question&&item.reply);const failed=interactions.filter(item=>isErrorStatus(item.status)&&item.question&&item.reply).length;const pending=interactions.filter(item=>item.status==='待回复'||item.status==='待重试').length;const records=interactions.filter(item=>(item.status==='已回复'||isErrorStatus(item.status))&&item.question&&item.reply);const tokenItems=Array.isArray(data.tokens)&&data.tokens.length?data.tokens:interactions.filter(item=>item.tokens);document.querySelector('#metricStatus').textContent=formatCount(interactions.length);document.querySelector('#metricLines').textContent=formatCount(completed.length);document.querySelector('#metricErrors').textContent=formatCount(failed);document.querySelector('#metricFiles').textContent=formatCount(pending);renderRecords(records.slice().reverse());renderTrend(completed);renderTokenRecords(tokenItems);if(recordsMeta)recordsMeta.textContent='已读取 '+formatCount(records.length)+' 条聊天记录，来源 '+formatCount(data.sources||0)+' 个日志源';if(manual&&recordsToast)recordsToast.textContent='已刷新所有记录'}catch(err){if(recordsMeta)recordsMeta.textContent='记录读取失败：'+err.message;if(recordsToast)recordsToast.textContent=err.message}}
-function renderRecords(items){if(!recordsBody)return;const signature=JSON.stringify(items.map(item=>recordKey(item)+'|'+(item.reply||'')+'|'+(item.status||'')+'|'+(item.tokens||0)+'|'+(item.linkId||0)));if(signature===recordsSignature)return;rememberRecordScrolls();recordsSignature=signature;recordsBody.innerHTML='';if(!items.length){const row=document.createElement('tr');const cell=document.createElement('td');cell.colSpan=7;cell.textContent='暂无可识别的用户提问/机器人回复记录';row.appendChild(cell);recordsBody.appendChild(row);return}items.forEach((item,index)=>{const key=recordKey(item,index);const row=document.createElement('tr');appendCell(row,item.time);appendCell(row,item.user||'未知用户');appendCell(row,item.question,'content-cell',key+':question');appendCell(row,item.reply||'—','content-cell',key+':reply');const statusCell=document.createElement('td');const badge=document.createElement('span');badge.className='badge '+(item.status==='已回复'?'ok':isErrorStatus(item.status)?'error':'warn');badge.textContent=item.status;statusCell.appendChild(badge);const copyBtn=document.createElement('button');copyBtn.type='button';copyBtn.className='copy-btn';copyBtn.textContent='复制';copyBtn.addEventListener('click',async()=>{await copyText(recordText(item));copyBtn.textContent='已复制';setTimeout(()=>copyBtn.textContent='复制',900)});statusCell.appendChild(copyBtn);row.appendChild(statusCell);appendPostCell(row,item);const actionCell=document.createElement('td');const stack=document.createElement('div');stack.className='action-stack';const regenerateBtn=document.createElement('button');regenerateBtn.type='button';regenerateBtn.className='copy-btn';regenerateBtn.textContent='重新生成';const feedback=document.createElement('span');feedback.className='action-feedback';regenerateBtn.addEventListener('click',()=>regenerateMessage(item,regenerateBtn,feedback));stack.appendChild(regenerateBtn);stack.appendChild(feedback);actionCell.appendChild(stack);row.appendChild(actionCell);recordsBody.appendChild(row)})}
+async function loadAllRecords(manual=false){
+	if(!manual&&activeView!=='home'&&activeView!=='records')return
+	const recentView=activeView==='records'
+	const requestPath='/api/records'+(recentView?'?window=24h':'')
+	if(manual&&recordsToast)recordsToast.textContent='正在刷新'+(recentView?'最近24小时':'所有')+'记录...'
+	try{
+		const data=await api(requestPath)
+		const lines=(data.content||'').split('\n').filter(Boolean)
+		const interactions=dedupeInteractions(parseInteractions(lines))
+		const completed=interactions.filter(item=>item.status==='已回复'&&item.question&&item.reply)
+		const failed=interactions.filter(item=>isErrorStatus(item.status)&&item.question&&item.reply).length
+		const pending=interactions.filter(item=>item.status==='待回复'||item.status==='待重试').length
+		const records=interactions.filter(item=>(item.status==='已回复'||isErrorStatus(item.status))&&item.question&&item.reply)
+		const recentCutoff=Date.now()-86400000
+		const visibleRecords=recentView?records.filter(item=>{const time=parseItemTime(item.time);return time&&time.getTime()>=recentCutoff}):records
+		const tokenItems=Array.isArray(data.tokens)&&data.tokens.length?data.tokens:interactions.filter(item=>item.tokens)
+		if(!recentView){
+			document.querySelector('#metricStatus').textContent=formatCount(interactions.length)
+			document.querySelector('#metricLines').textContent=formatCount(completed.length)
+			document.querySelector('#metricErrors').textContent=formatCount(failed)
+			document.querySelector('#metricFiles').textContent=formatCount(pending)
+			renderTrend(completed)
+			renderTokenRecords(tokenItems)
+		}
+		if(recentView)renderRecords(visibleRecords.slice().reverse())
+		if(recordsMeta)recordsMeta.textContent=recentView?'已读取最近24小时 '+formatCount(visibleRecords.length)+' 条聊天记录，来源 '+formatCount(data.sources||0)+' 个日志源':'已读取 '+formatCount(records.length)+' 条聊天记录，来源 '+formatCount(data.sources||0)+' 个日志源'
+		if(manual&&recordsToast)recordsToast.textContent=recentView?'已刷新最近24小时记录':'已刷新所有记录'
+	}catch(err){
+		if(recordsMeta)recordsMeta.textContent='记录读取失败：'+err.message
+		if(recordsToast)recordsToast.textContent=err.message
+	}}
+function renderRecords(items){if(!recordsBody)return;const signature=JSON.stringify(items.map(item=>recordKey(item)+'|'+(item.reply||'')+'|'+(item.status||'')+'|'+(item.tokens||0)+'|'+(item.linkId||0)));if(signature===recordsSignature)return;rememberRecordScrolls();recordsSignature=signature;recordsBody.innerHTML='';if(!items.length){const row=document.createElement('tr');const cell=document.createElement('td');cell.colSpan=7;cell.textContent='暂无最近24小时可识别的用户提问/机器人回复记录';row.appendChild(cell);recordsBody.appendChild(row);return}items.forEach((item,index)=>{const key=recordKey(item,index);const row=document.createElement('tr');appendCell(row,item.time);appendCell(row,item.user||'未知用户');appendCell(row,item.question,'content-cell',key+':question');appendCell(row,item.reply||'—','content-cell',key+':reply');const statusCell=document.createElement('td');const badge=document.createElement('span');badge.className='badge '+(item.status==='已回复'?'ok':isErrorStatus(item.status)?'error':'warn');badge.textContent=item.status;statusCell.appendChild(badge);const copyBtn=document.createElement('button');copyBtn.type='button';copyBtn.className='copy-btn';copyBtn.textContent='复制';copyBtn.addEventListener('click',async()=>{await copyText(recordText(item));copyBtn.textContent='已复制';setTimeout(()=>copyBtn.textContent='复制',900)});statusCell.appendChild(copyBtn);row.appendChild(statusCell);appendPostCell(row,item);const actionCell=document.createElement('td');const stack=document.createElement('div');stack.className='action-stack';const regenerateBtn=document.createElement('button');regenerateBtn.type='button';regenerateBtn.className='copy-btn';regenerateBtn.textContent='重新生成';const feedback=document.createElement('span');feedback.className='action-feedback';regenerateBtn.addEventListener('click',()=>regenerateMessage(item,regenerateBtn,feedback));stack.appendChild(regenerateBtn);stack.appendChild(feedback);actionCell.appendChild(stack);row.appendChild(actionCell);recordsBody.appendChild(row)})}
 function rememberRecordScrolls(){recordsBody?.querySelectorAll('.clip-cell[data-scroll-key]').forEach(cell=>recordScrollMemory.set(cell.dataset.scrollKey,cell.scrollTop))}
 function recordKey(item,index=0){if(item.msgId||item.commentId)return [item.msgId||'',item.commentId||''].join('|');const fallback=[item.linkId||'',item.time||'',normalizeText(item.user||''),normalizeText(item.question||''),normalizeText(item.reply||'')].join('|');return fallback||String(index)}
 function renderLogLines(content){const selectedLines=selectedLogLineIndexes();logOutput.innerHTML='';logOutput.dataset.raw=content||'';logOutput.classList.toggle('empty',!content);if(!content){logOutput.textContent='暂无日志。';lastSelectedLogLine=-1;return}content.split('\n').forEach((line,index)=>{const item=document.createElement('span');item.className='log-line';item.dataset.index=String(index);item.textContent=line||' ';item.title='点击选择这一行，Shift 点击选择范围，再点复制选中';item.classList.toggle('selected',selectedLines.has(index));item.addEventListener('click',event=>toggleLogLineSelection(index,event.shiftKey));logOutput.appendChild(item)})}
@@ -1368,7 +1470,7 @@ function filterLogContent(content){if(!content)return'';const mode=logFilter?.va
 function matchesLogFilter(line,mode){switch(mode){case'error':return isFailureLine(line);case'ask':return line.includes('[Ai]正在询问Ai');case'reply':return line.includes('[Ai]Ai说：');case'image':return /图片|生图|画图|生成图片|image|upload|imgs/i.test(line);default:return true}}
 function appendCell(row,text,className,scrollKey){const cell=document.createElement('td');if(className){cell.className=className;const inner=document.createElement('div');inner.className='clip-cell';inner.textContent=text||'—';if(scrollKey){inner.dataset.scrollKey=scrollKey;inner.scrollTop=recordScrollMemory.get(scrollKey)||0;inner.addEventListener('scroll',()=>recordScrollMemory.set(scrollKey,inner.scrollTop),{passive:true})}cell.appendChild(inner)}else{cell.textContent=text||'—'}row.appendChild(cell)}
 function appendPostCell(row,item){const cell=document.createElement('td');const href=postHref(item.linkId);if(href){const link=document.createElement('a');link.className='copy-btn';link.href=href;link.target='_blank';link.rel='noopener noreferrer';link.textContent='打开';cell.appendChild(link)}else{cell.textContent='—'}row.appendChild(cell)}
-function postHref(linkId){const id=Number(linkId||0);if(!Number.isFinite(id)||id<=0)return'';return 'https://api.xiaoheihe.cn/open_inapp/#heybox://'+encodeURIComponent(JSON.stringify({protocol_type:'openLink',link_id:String(id)}))}
+function postHref(linkId){const id=Number(linkId||0);if(!Number.isFinite(id)||id<=0)return'';return 'https://www.xiaoheihe.cn/app/bbs/link/'+id}
 function renderTokenRecords(items){const totalEl=document.querySelector('#tokenTotal');const hourEl=document.querySelector('#tokenHour');const dayEl=document.querySelector('#tokenDay');const now=Date.now();let total=0;let hour=0;let day=0;for(const item of items){if(!item.tokens)continue;total+=item.tokens;const time=parseItemTime(item.time);if(!time)continue;const age=now-time.getTime();if(age>=0&&age<=3600000)hour+=item.tokens;if(age>=0&&age<=86400000)day+=item.tokens}setTokenText(totalEl,total);setTokenText(hourEl,hour);setTokenText(dayEl,day)}
 function setTokenText(el,value){if(!el)return;el.textContent=formatTokenCount(value);el.title=formatCount(value)+' token'}
 function parseInteractions(lines){const items=[];const pending=[];let lastAnswered=null;let currentMessage=null;for(const line of lines){if(line.includes('[XHH]正在处理@消息')){currentMessage=parseProcessingLine(line);continue}if(line.includes('[Ai]正在询问Ai')){const context=parseProcessingLine(line)||currentMessage;const next=attachMessageContext(parseQuestionLine(line),context);if(next.question&&!pending.some(item=>sameInteraction(item,next)))pending.push(next);currentMessage=null;continue}if(line.includes('[Ai]Ai说：')){const context=parseProcessingLine(line);let index=findPendingIndex(pending,context);if(index<0&&pending.length)index=0;const item=index>=0?pending.splice(index,1)[0]:attachMessageContext({reply:'',status:'待回复'},context);if(!item.question)continue;item.reply=extractJsonField(line,'text')||stripLogPrefix(line);item.tokens=extractToken(line);item.status='已回复';items.push(item);lastAnswered=item;continue}if(isSendAnomalyLine(line)&&lastAnswered&&lastAnswered.status==='已回复'){attachMessageContext(lastAnswered,parseAnomalyLine(line));lastAnswered.status='异常发送';lastAnswered.lastError=stripLogPrefix(line);continue}if(isFailureLine(line)){const failed=attachMessageContext(parseStandaloneFailureLine(line),currentMessage);const index=findPendingIndex(pending,failed);if(index>=0){const item=pending.splice(index,1)[0];item.lastError=failed.reply;item.status='失败';items.push(finalizePending(item));currentMessage=null;continue}if(failed.question&&failed.reply){items.push(failed);currentMessage=null}}}for(const item of pending){if(item.question)items.push(finalizePending(item))}return items}
