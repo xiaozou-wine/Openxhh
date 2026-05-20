@@ -254,21 +254,15 @@ func shouldQueueMessage(v Msg) bool {
 
 func AutoReply() {
 	for {
-		Arr := db.GetComm(MaxReplyThreads)
+		candidates := db.GetComm(replyCandidateLimit())
+		Arr := selectReplyBatch(candidates)
 		if len(Arr) == 0 {
 			fmt.Println("[XHH]无可回复", time.Now().Format("2006-01-02 15:04:05"))
 			time.Sleep(time.Duration(ReplyTime) * time.Second)
 			continue
 		}
 
-		workerCount := MaxReplyThreads
-		if workerCount <= 0 {
-			workerCount = defaultMaxReplyThreads
-		}
-		if workerCount > len(Arr) {
-			workerCount = len(Arr)
-		}
-
+		workerCount := replyWorkerCount(Arr)
 		jobs := make(chan db.CommStruct)
 		var wg sync.WaitGroup
 		loger.Loger.Info("[XHH]正在回复评论", zap.Int("评论数", len(Arr)), zap.Int("最高回复线程", workerCount))
@@ -288,6 +282,57 @@ func AutoReply() {
 		wg.Wait()
 		time.Sleep(time.Duration(ReplyTime) * time.Second)
 	}
+}
+
+func replyCandidateLimit() int {
+	limit := MaxPendingReplies
+	if limit <= 0 {
+		limit = defaultMaxPendingReplies
+	}
+	return limit + replyThreadLimit()
+}
+
+func replyThreadLimit() int {
+	if MaxReplyThreads <= 0 {
+		return defaultMaxReplyThreads
+	}
+	return MaxReplyThreads
+}
+
+func selectReplyBatch(candidates []db.CommStruct) []db.CommStruct {
+	threadLimit := replyThreadLimit()
+	ownerReplies := make([]db.CommStruct, 0, threadLimit)
+	var normalReply *db.CommStruct
+	for _, candidate := range candidates {
+		candidate := candidate
+		if IsOwner(candidate.Uid) {
+			if len(ownerReplies) < threadLimit {
+				ownerReplies = append(ownerReplies, candidate)
+			}
+			continue
+		}
+		if normalReply == nil {
+			normalReply = &candidate
+		}
+	}
+	if len(ownerReplies) > 0 {
+		return ownerReplies
+	}
+	if normalReply != nil {
+		return []db.CommStruct{*normalReply}
+	}
+	return nil
+}
+
+func replyWorkerCount(replies []db.CommStruct) int {
+	if len(replies) <= 1 {
+		return len(replies)
+	}
+	workerCount := replyThreadLimit()
+	if workerCount > len(replies) {
+		return len(replies)
+	}
+	return workerCount
 }
 
 func appendOwnerContext(contents []ai.Content, userID int) []ai.Content {
