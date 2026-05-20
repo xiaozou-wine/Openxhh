@@ -1,7 +1,10 @@
 package ai
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"openxhh/config"
 	"testing"
 )
@@ -127,6 +130,70 @@ func TestParseResponsesResp(t *testing.T) {
 	}
 	if len(resp.Choices) != 1 || resp.Choices[0].Msg.Content != "direct" || resp.Usage.TotalToken != 7 {
 		t.Fatalf("response = %+v", resp)
+	}
+}
+
+func TestSendChatCompletionUsesResponsesInput(t *testing.T) {
+	restoreAIConfig(t)
+
+	type requestBody struct {
+		Model string `json:"model"`
+		Input []struct {
+			Role    string `json:"role"`
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"input"`
+		Stream bool `json:"stream"`
+	}
+	type requestResult struct {
+		body requestBody
+		err  error
+	}
+
+	resultCh := make(chan requestResult, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var body requestBody
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			resultCh <- requestResult{err: err}
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		resultCh <- requestResult{body: body}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"output_text":"route-ok","usage":{"total_tokens":3}}`))
+	}))
+	defer server.Close()
+
+	config.ConfigStruct.Ai.BaseUrl = server.URL + "/v1/responses"
+	got, err := sendChatCompletion(context.Background(), "route-model", []chatCompletionMessage{
+		{Role: "system", Content: "system prompt"},
+		{Role: "user", Content: "hello"},
+	})
+	if err != nil {
+		t.Fatalf("sendChatCompletion returned error: %v", err)
+	}
+	if got != "route-ok" {
+		t.Fatalf("response text = %q, want route-ok", got)
+	}
+
+	result := <-resultCh
+	if result.err != nil {
+		t.Fatalf("decode request body: %v", result.err)
+	}
+	if result.body.Model != "route-model" {
+		t.Fatalf("model = %q", result.body.Model)
+	}
+	if len(result.body.Input) != 2 || result.body.Input[0].Role != "developer" || result.body.Input[1].Role != "user" {
+		t.Fatalf("input roles = %+v", result.body.Input)
+	}
+	if len(result.body.Input[0].Content) != 1 || result.body.Input[0].Content[0].Type != "input_text" || result.body.Input[0].Content[0].Text != "system prompt" {
+		t.Fatalf("developer content = %+v", result.body.Input[0].Content)
+	}
+	if len(result.body.Input[1].Content) != 1 || result.body.Input[1].Content[0].Type != "input_text" || result.body.Input[1].Content[0].Text != "hello" {
+		t.Fatalf("user content = %+v", result.body.Input[1].Content)
 	}
 }
 

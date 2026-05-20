@@ -62,15 +62,8 @@ func RefineImagePrompt(ctx context.Context, req ImagePromptRefineRequest) (Image
 		return ImagePromptRefineResult{}, errors.New("image prompt refine is not configured")
 	}
 
-	body := promptRefineBody{
-		Model:  promptRefineModel(),
-		Stream: false,
-		Messages: []promptRefineMessage{
-			{Role: "system", Content: imagePromptRefineSystemPrompt()},
-			{Role: "user", Content: buildImagePromptRefineUserPrompt(req)},
-		},
-	}
-	payload, err := json.Marshal(body)
+	useResponses := useResponsesAPI(promptRefineBaseURL())
+	payload, err := buildImagePromptRefinePayload(req, useResponses)
 	if err != nil {
 		return ImagePromptRefineResult{}, err
 	}
@@ -78,7 +71,7 @@ func RefineImagePrompt(ctx context.Context, req ImagePromptRefineRequest) (Image
 	started := time.Now()
 	var lastErr error
 	for attempt := 1; attempt <= chatCompletionAttempts; attempt++ {
-		result, err := refineImagePromptOnce(ctx, payload)
+		result, err := refineImagePromptOnce(ctx, payload, useResponses)
 		if err == nil {
 			loger.Loger.Info("[Image]文本模型已优化生图 prompt", zap.Int("prompt_chars", len([]rune(result.ImagePrompt))), zap.Duration("duration", time.Since(started)))
 			return result, nil
@@ -94,7 +87,37 @@ func RefineImagePrompt(ctx context.Context, req ImagePromptRefineRequest) (Image
 	return ImagePromptRefineResult{}, lastErr
 }
 
-func refineImagePromptOnce(ctx context.Context, payload []byte) (ImagePromptRefineResult, error) {
+func buildImagePromptRefinePayload(req ImagePromptRefineRequest, useResponses bool) ([]byte, error) {
+	messages := []promptRefineMessage{
+		{Role: "system", Content: imagePromptRefineSystemPrompt()},
+		{Role: "user", Content: buildImagePromptRefineUserPrompt(req)},
+	}
+	if useResponses {
+		rawMessages := make([]any, 0, len(messages))
+		for _, message := range messages {
+			rawMessages = append(rawMessages, message)
+		}
+		input, err := toResponsesInput(rawMessages)
+		if err != nil {
+			return nil, err
+		}
+		body := responsesBodyStruct{
+			Model:  promptRefineModel(),
+			Input:  input,
+			Stream: false,
+		}
+		return json.Marshal(body)
+	}
+
+	body := promptRefineBody{
+		Model:    promptRefineModel(),
+		Stream:   false,
+		Messages: messages,
+	}
+	return json.Marshal(body)
+}
+
+func refineImagePromptOnce(ctx context.Context, payload []byte, useResponses bool) (ImagePromptRefineResult, error) {
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", promptRefineBaseURL(), bytes.NewReader(payload))
 	if err != nil {
 		return ImagePromptRefineResult{}, err
@@ -116,6 +139,17 @@ func refineImagePromptOnce(ctx context.Context, payload []byte) (ImagePromptRefi
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return ImagePromptRefineResult{}, chatCompletionStatusError{statusCode: resp.StatusCode, body: limitRefineString(string(data), 300)}
+	}
+
+	if useResponses {
+		parsed, err := parseResponsesResp(data)
+		if err != nil {
+			return ImagePromptRefineResult{}, err
+		}
+		if len(parsed.Choices) == 0 || strings.TrimSpace(parsed.Choices[0].Msg.Content) == "" {
+			return ImagePromptRefineResult{}, errors.New("prompt refine response has no content")
+		}
+		return ParseImagePromptRefineContent(parsed.Choices[0].Msg.Content)
 	}
 
 	var parsed promptRefineResponse

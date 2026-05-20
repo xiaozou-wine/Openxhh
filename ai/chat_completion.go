@@ -25,23 +25,15 @@ func sendChatCompletion(ctx context.Context, model string, messages []chatComple
 	if strings.TrimSpace(model) == "" {
 		return "", errors.New("model is empty")
 	}
-	body := struct {
-		Model    string                  `json:"model"`
-		Messages []chatCompletionMessage `json:"messages"`
-		Stream   bool                    `json:"stream"`
-	}{
-		Model:    model,
-		Messages: messages,
-		Stream:   false,
-	}
-	payload, err := json.Marshal(body)
+	useResponses := useResponsesAPI(config.ConfigStruct.Ai.BaseUrl)
+	payload, err := buildChatCompletionPayload(model, messages, useResponses)
 	if err != nil {
 		return "", err
 	}
 
 	var lastErr error
 	for attempt := 1; attempt <= chatCompletionAttempts; attempt++ {
-		content, err := sendChatCompletionOnce(ctx, payload)
+		content, err := sendChatCompletionOnce(ctx, payload, useResponses)
 		if err == nil {
 			return content, nil
 		}
@@ -56,7 +48,37 @@ func sendChatCompletion(ctx context.Context, model string, messages []chatComple
 	return "", lastErr
 }
 
-func sendChatCompletionOnce(ctx context.Context, payload []byte) (string, error) {
+func buildChatCompletionPayload(model string, messages []chatCompletionMessage, useResponses bool) ([]byte, error) {
+	if useResponses {
+		rawMessages := make([]any, 0, len(messages))
+		for _, message := range messages {
+			rawMessages = append(rawMessages, message)
+		}
+		input, err := toResponsesInput(rawMessages)
+		if err != nil {
+			return nil, err
+		}
+		body := responsesBodyStruct{
+			Model:  model,
+			Input:  input,
+			Stream: false,
+		}
+		return json.Marshal(body)
+	}
+
+	body := struct {
+		Model    string                  `json:"model"`
+		Messages []chatCompletionMessage `json:"messages"`
+		Stream   bool                    `json:"stream"`
+	}{
+		Model:    model,
+		Messages: messages,
+		Stream:   false,
+	}
+	return json.Marshal(body)
+}
+
+func sendChatCompletionOnce(ctx context.Context, payload []byte, useResponses bool) (string, error) {
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", config.ConfigStruct.Ai.BaseUrl, bytes.NewReader(payload))
 	if err != nil {
 		return "", err
@@ -76,6 +98,17 @@ func sendChatCompletionOnce(ctx context.Context, payload []byte) (string, error)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", chatCompletionStatusError{statusCode: resp.StatusCode, body: limitRefineString(string(data), 300)}
+	}
+
+	if useResponses {
+		parsed, err := parseResponsesResp(data)
+		if err != nil {
+			return "", err
+		}
+		if len(parsed.Choices) == 0 || strings.TrimSpace(parsed.Choices[0].Msg.Content) == "" {
+			return "", errors.New("chat completion response has no content")
+		}
+		return parsed.Choices[0].Msg.Content, nil
 	}
 
 	var parsed promptRefineResponse
