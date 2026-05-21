@@ -174,3 +174,26 @@ func TestShouldSaveTrackedInboundSkipsBotAndUnresolvedBotComment(t *testing.T) {
 		t.Fatal("should skip when bot comment is unresolved")
 	}
 }
+
+func TestLinkAuthorIsBot(t *testing.T) {
+	var resp LinkInfoS
+	resp.Result.Link.UserID = []byte(`42`)
+	if !linkAuthorIsBot(resp, 42) {
+		t.Fatal("linkAuthorIsBot should use top-level userid")
+	}
+
+	resp.Result.Link.UserID = nil
+	resp.Result.Link.User.UserID = []byte(`"42"`)
+	if !linkAuthorIsBot(resp, 42) {
+		t.Fatal("linkAuthorIsBot should use nested user.userid")
+	}
+}
+
+func TestInboundMessageStreamPostSource(t *testing.T) {
+	if got := inboundMessageStreamPostSource(CommentInfo{CommentID: 90}); got != "comment_on_bot_post" {
+		t.Fatalf("top-level post comment source = %q", got)
+	}
+	if got := inboundMessageStreamPostSource(CommentInfo{CommentID: 91, ReplyID: 90}); got != "nested_comment_on_bot_post" {
+		t.Fatalf("nested post comment source = %q", got)
+	}
+}
