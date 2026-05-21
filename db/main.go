@@ -9,6 +9,7 @@ import (
 	"openxhh/pg"
 	"openxhh/sqlite"
 
+	"github.com/jackc/pgx/v5"
 	"go.uber.org/zap"
 )
 
@@ -200,9 +201,6 @@ func GetCommExcludingUserIDs(userIDs []int, limit int) []CommStruct {
 }
 
 func getCommByUserFilter(userIDs []int, limit int, exclude bool) (CommArr []CommStruct) {
-	if limit <= 0 {
-		limit = 1
-	}
 	if len(userIDs) == 0 {
 		if exclude {
 			return GetComm(limit)
@@ -216,7 +214,14 @@ func getCommByUserFilter(userIDs []int, limit int, exclude bool) (CommArr []Comm
 		if exclude {
 			condition = "NOT (user_a_id = ANY($1::bigint[]))"
 		}
-		row, err := pg.Conn.Query(ctx, "SELECT msg_id,link_id,comment_a_id,comment_root_id,comment_text,user_a_id,user_a_name FROM at WHERE reply=false AND "+condition+" ORDER BY msg_id ASC LIMIT $2", ids, limit)
+		query := "SELECT msg_id,link_id,comment_a_id,comment_root_id,comment_text,user_a_id,user_a_name FROM at WHERE reply=false AND " + condition + " ORDER BY msg_id ASC"
+		var row pgx.Rows
+		var err error
+		if limit > 0 {
+			row, err = pg.Conn.Query(ctx, query+" LIMIT $2", ids, limit)
+		} else {
+			row, err = pg.Conn.Query(ctx, query, ids)
+		}
 		if err != nil {
 			loger.Loger.Error("[DB]无法获取评论信息", zap.Error(err))
 			return
@@ -239,8 +244,12 @@ func getCommByUserFilter(userIDs []int, limit int, exclude bool) (CommArr []Comm
 		for _, id := range userIDs {
 			args = append(args, id)
 		}
-		args = append(args, limit)
-		row, err := sqlite.Db.Query("SELECT msg_id,link_id,comment_a_id,comment_root_id,comment_text,user_a_id,user_a_name FROM at WHERE reply=false AND "+condition+" ORDER BY msg_id ASC LIMIT ?", args...)
+		query := "SELECT msg_id,link_id,comment_a_id,comment_root_id,comment_text,user_a_id,user_a_name FROM at WHERE reply=false AND " + condition + " ORDER BY msg_id ASC"
+		if limit > 0 {
+			query += " LIMIT ?"
+			args = append(args, limit)
+		}
+		row, err := sqlite.Db.Query(query, args...)
 		if err != nil {
 			loger.Loger.Error("[DB]无法获取评论信息", zap.Error(err))
 			return

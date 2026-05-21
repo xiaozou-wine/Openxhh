@@ -93,3 +93,19 @@ func TestGetCommExcludingUserIDsSkipsOwners(t *testing.T) {
 		t.Fatalf("GetCommExcludingUserIDs returned %+v, want msg 20 non-owner", got[0])
 	}
 }
+
+func TestGetCommByUserIDsWithoutLimitReturnsAllOwners(t *testing.T) {
+	setupSQLiteCommTest(t)
+	insertCommForTest(t, 10, 100, false)
+	insertCommForTest(t, 20, 100, false)
+	insertCommForTest(t, 30, 100, false)
+	insertCommForTest(t, 40, 200, false)
+
+	got := GetCommByUserIDs([]int{100}, 0)
+	if len(got) != 3 {
+		t.Fatalf("len(GetCommByUserIDs) = %d, want 3", len(got))
+	}
+	if got[0].MsgID != 10 || got[1].MsgID != 20 || got[2].MsgID != 30 {
+		t.Fatalf("GetCommByUserIDs msg ids = [%d %d %d], want [10 20 30]", got[0].MsgID, got[1].MsgID, got[2].MsgID)
+	}
+}

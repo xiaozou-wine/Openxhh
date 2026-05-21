@@ -62,7 +62,7 @@ func insertSchedulerCommForTest(t *testing.T, msgID, userID int) {
 	}
 }
 
-func TestSelectReplyBatchLimitsNormalUsersToOne(t *testing.T) {
+func TestSelectReplyBatchUsesLimitForNormalUsers(t *testing.T) {
 	resetReplySchedulerState(t)
 	config.ConfigStruct.Xhh.Owner = "100"
 	Owners = nil
@@ -73,23 +73,18 @@ func TestSelectReplyBatchLimitsNormalUsersToOne(t *testing.T) {
 		{MsgID: 1, Uid: 200},
 		{MsgID: 2, Uid: 201},
 		{MsgID: 3, Uid: 202},
-	})
+		{MsgID: 4, Uid: 203},
+	}, nil, 3, replyKindNormal)
 
-	if len(got) != 1 {
-		t.Fatalf("len(selectReplyBatch) = %d, want 1", len(got))
+	if len(got) != 3 {
+		t.Fatalf("len(selectReplyBatch) = %d, want 3", len(got))
 	}
-	if got[0].MsgID != 1 {
-		t.Fatalf("selected MsgID = %d, want 1", got[0].MsgID)
-	}
-	if workers := replyWorkerCount(got); workers != 1 {
-		t.Fatalf("replyWorkerCount = %d, want 1", workers)
-	}
-	if batchType := replyBatchType(got); batchType != "普通用户" {
-		t.Fatalf("replyBatchType = %q, want 普通用户", batchType)
+	if got[0].MsgID != 1 || got[1].MsgID != 2 || got[2].MsgID != 3 {
+		t.Fatalf("selected msg ids = [%d %d %d], want [1 2 3]", got[0].MsgID, got[1].MsgID, got[2].MsgID)
 	}
 }
 
-func TestSelectReplyBatchUsesThreadLimitForOwners(t *testing.T) {
+func TestSelectReplyBatchDoesNotLimitOwners(t *testing.T) {
 	resetReplySchedulerState(t)
 	config.ConfigStruct.Xhh.Owner = "100"
 	Owners = nil
@@ -101,21 +96,15 @@ func TestSelectReplyBatchUsesThreadLimitForOwners(t *testing.T) {
 		{MsgID: 2, Uid: 100},
 		{MsgID: 3, Uid: 100},
 		{MsgID: 4, Uid: 100},
-	})
+	}, nil, 0, replyKindOwner)
 
-	if len(got) != 2 {
-		t.Fatalf("len(selectReplyBatch) = %d, want 2", len(got))
+	if len(got) != 3 {
+		t.Fatalf("len(selectReplyBatch) = %d, want 3", len(got))
 	}
 	for _, item := range got {
 		if item.Uid != 100 {
 			t.Fatalf("selected non-owner reply: %+v", item)
 		}
-	}
-	if workers := replyWorkerCount(got); workers != 2 {
-		t.Fatalf("replyWorkerCount = %d, want 2", workers)
-	}
-	if batchType := replyBatchType(got); batchType != "owner" {
-		t.Fatalf("replyBatchType = %q, want owner", batchType)
 	}
 }
 
@@ -128,7 +117,7 @@ func TestReplyThreadLimitDefaultsWhenConfigInvalid(t *testing.T) {
 	}
 }
 
-func TestNextReplyBatchPrefersOwnerOverOlderNormalReplies(t *testing.T) {
+func TestNextReplyBatchIncludesOwnersAndNormalSlots(t *testing.T) {
 	resetReplySchedulerState(t)
 	setupXHHSQLiteCommTest(t)
 	config.ConfigStruct.Xhh.Owner = "100"
@@ -137,25 +126,30 @@ func TestNextReplyBatchPrefersOwnerOverOlderNormalReplies(t *testing.T) {
 	MaxReplyThreads = 2
 	insertSchedulerCommForTest(t, 10, 200)
 	insertSchedulerCommForTest(t, 20, 201)
+	insertSchedulerCommForTest(t, 25, 202)
 	insertSchedulerCommForTest(t, 30, 100)
 	insertSchedulerCommForTest(t, 40, 100)
 	insertSchedulerCommForTest(t, 50, 100)
 
 	got := nextReplyBatch()
-	if len(got) != 2 {
-		t.Fatalf("len(nextReplyBatch) = %d, want 2", len(got))
+	if len(got) != 5 {
+		t.Fatalf("len(nextReplyBatch) = %d, want 5", len(got))
 	}
+	ownerCount := 0
+	normalCount := 0
 	for _, item := range got {
-		if item.Uid != 100 {
-			t.Fatalf("nextReplyBatch selected non-owner reply: %+v", item)
+		if item.Uid == 100 {
+			ownerCount++
+		} else {
+			normalCount++
 		}
 	}
-	if got[0].MsgID != 30 || got[1].MsgID != 40 {
-		t.Fatalf("nextReplyBatch msg ids = [%d %d], want [30 40]", got[0].MsgID, got[1].MsgID)
+	if ownerCount != 3 || normalCount != 2 {
+		t.Fatalf("nextReplyBatch owner=%d normal=%d, want owner=3 normal=2", ownerCount, normalCount)
 	}
 }
 
-func TestNextReplyBatchFallsBackToSingleNormalReply(t *testing.T) {
+func TestNextReplyBatchFallsBackToNormalThreadLimit(t *testing.T) {
 	resetReplySchedulerState(t)
 	setupXHHSQLiteCommTest(t)
 	config.ConfigStruct.Xhh.Owner = "100"
@@ -164,13 +158,76 @@ func TestNextReplyBatchFallsBackToSingleNormalReply(t *testing.T) {
 	MaxReplyThreads = 3
 	insertSchedulerCommForTest(t, 10, 200)
 	insertSchedulerCommForTest(t, 20, 201)
+	insertSchedulerCommForTest(t, 30, 202)
+	insertSchedulerCommForTest(t, 40, 203)
 
 	got := nextReplyBatch()
-	if len(got) != 1 {
-		t.Fatalf("len(nextReplyBatch) = %d, want 1", len(got))
+	if len(got) != 3 {
+		t.Fatalf("len(nextReplyBatch) = %d, want 3", len(got))
 	}
-	if got[0].MsgID != 10 || got[0].Uid == 100 {
-		t.Fatalf("nextReplyBatch selected %+v, want oldest normal reply", got[0])
+	if got[0].MsgID != 10 || got[1].MsgID != 20 || got[2].MsgID != 30 {
+		t.Fatalf("nextReplyBatch msg ids = [%d %d %d], want [10 20 30]", got[0].MsgID, got[1].MsgID, got[2].MsgID)
+	}
+}
+
+func TestNextOwnerReplyBatchSkipsInFlightReply(t *testing.T) {
+	resetReplySchedulerState(t)
+	setupXHHSQLiteCommTest(t)
+	config.ConfigStruct.Xhh.Owner = "100"
+	Owners = nil
+	ownerIDsLoaded = false
+	MaxReplyThreads = 1
+	insertSchedulerCommForTest(t, 10, 100)
+	insertSchedulerCommForTest(t, 20, 100)
+	insertSchedulerCommForTest(t, 30, 100)
+
+	got := nextOwnerReplyBatch(map[int]string{10: replyKindOwner})
+	if len(got) != 2 {
+		t.Fatalf("len(nextOwnerReplyBatch) = %d, want 2", len(got))
+	}
+	if got[0].MsgID != 20 || got[1].MsgID != 30 {
+		t.Fatalf("nextOwnerReplyBatch msg ids = [%d %d], want [20 30]", got[0].MsgID, got[1].MsgID)
+	}
+}
+
+func TestNextNormalReplyBatchIgnoresActiveOwner(t *testing.T) {
+	resetReplySchedulerState(t)
+	setupXHHSQLiteCommTest(t)
+	config.ConfigStruct.Xhh.Owner = "100"
+	Owners = nil
+	ownerIDsLoaded = false
+	MaxReplyThreads = 2
+	insertSchedulerCommForTest(t, 10, 200)
+	insertSchedulerCommForTest(t, 20, 201)
+	insertSchedulerCommForTest(t, 30, 202)
+
+	got := nextNormalReplyBatch(map[int]string{40: replyKindOwner})
+	if len(got) != 2 {
+		t.Fatalf("len(nextNormalReplyBatch) = %d, want 2", len(got))
+	}
+	if got[0].MsgID != 10 || got[1].MsgID != 20 {
+		t.Fatalf("nextNormalReplyBatch msg ids = [%d %d], want [10 20]", got[0].MsgID, got[1].MsgID)
+	}
+}
+
+func TestNextNormalReplyBatchSkipsInFlightNormalReplies(t *testing.T) {
+	resetReplySchedulerState(t)
+	setupXHHSQLiteCommTest(t)
+	config.ConfigStruct.Xhh.Owner = "100"
+	Owners = nil
+	ownerIDsLoaded = false
+	MaxReplyThreads = 3
+	insertSchedulerCommForTest(t, 10, 200)
+	insertSchedulerCommForTest(t, 20, 201)
+	insertSchedulerCommForTest(t, 30, 202)
+	insertSchedulerCommForTest(t, 40, 203)
+
+	got := nextNormalReplyBatch(map[int]string{10: replyKindNormal, 20: replyKindNormal})
+	if len(got) != 1 {
+		t.Fatalf("len(nextNormalReplyBatch) = %d, want 1", len(got))
+	}
+	if got[0].MsgID != 30 {
+		t.Fatalf("nextNormalReplyBatch selected MsgID %d, want 30", got[0].MsgID)
 	}
 }
 

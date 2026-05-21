@@ -12,7 +12,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -34,9 +33,17 @@ const defaultMaxPendingReplies = 50
 const defaultMaxPendingRepliesPerUser = 5
 const messagePageLimit = 20
 const maxMessagePages = 5
+const replySchedulerActivePoll = time.Second
 
 const messageTypeAtPost = 16
 const messageTypeAtComment = 17
+
+const replyKindOwner = "owner"
+const replyKindNormal = "普通用户"
+
+type replyDone struct {
+	msgID int
+}
 
 func ShouldMentionTarget(text string) bool {
 	triggers := []string{"对方", "那个人", "这个人", "楼上", "上面", "艾特他", "艾特她", "提到他", "提到她", "喊他", "喊她", "叫他", "叫她", "回复他", "回复她", "反驳他", "反驳她", "怼他", "怼她", "问问他", "问问她", "告诉他", "告诉她", "安慰他", "安慰她"}
@@ -253,42 +260,67 @@ func shouldQueueMessage(v Msg) bool {
 }
 
 func AutoReply() {
+	done := make(chan replyDone, replyThreadLimit()+1)
+	inFlight := make(map[int]string)
 	for {
-		Arr := nextReplyBatch()
-		if len(Arr) == 0 {
+		drainCompletedReplies(done, inFlight)
+		launched := launchReplyBatch(nextOwnerReplyBatch(inFlight), replyKindOwner, done, inFlight)
+		launched = launchReplyBatch(nextNormalReplyBatch(inFlight), replyKindNormal, done, inFlight) || launched
+		if !launched && len(inFlight) == 0 {
 			fmt.Println("[XHH]无可回复", time.Now().Format("2006-01-02 15:04:05"))
-			time.Sleep(time.Duration(ReplyTime) * time.Second)
+		}
+		if len(inFlight) > 0 {
+			time.Sleep(replySchedulerActivePoll)
 			continue
 		}
-
-		workerCount := replyWorkerCount(Arr)
-		jobs := make(chan db.CommStruct)
-		var wg sync.WaitGroup
-		loger.Loger.Info("[XHH]正在处理回复批次", zap.String("批次类型", replyBatchType(Arr)), zap.Int("评论数", len(Arr)), zap.Int("实际回复线程", workerCount), zap.Int("owner线程上限", replyThreadLimit()))
-		for i := 0; i < workerCount; i++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				for v := range jobs {
-					replyComment(v)
-				}
-			}()
-		}
-		for _, v := range Arr {
-			jobs <- v
-		}
-		close(jobs)
-		wg.Wait()
 		time.Sleep(time.Duration(ReplyTime) * time.Second)
 	}
 }
 
-func nextReplyBatch() []db.CommStruct {
-	ownerReplies := selectReplyBatch(db.GetCommByUserIDs(ownerIDs(), replyThreadLimit()))
-	if len(ownerReplies) > 0 {
-		return ownerReplies
+func drainCompletedReplies(done <-chan replyDone, inFlight map[int]string) {
+	for {
+		select {
+		case item := <-done:
+			delete(inFlight, item.msgID)
+		default:
+			return
+		}
 	}
-	return selectReplyBatch(db.GetCommExcludingUserIDs(ownerIDs(), 1))
+}
+
+func launchReplyBatch(replies []db.CommStruct, kind string, done chan<- replyDone, inFlight map[int]string) bool {
+	if len(replies) == 0 {
+		return false
+	}
+	loger.Loger.Info("[XHH]正在处理回复批次", zap.String("批次类型", kind), zap.Int("评论数", len(replies)), zap.Int("实际回复线程", len(replies)), zap.Int("普通线程上限", replyThreadLimit()))
+	for _, reply := range replies {
+		reply := reply
+		inFlight[reply.MsgID] = kind
+		go func() {
+			defer func() { done <- replyDone{msgID: reply.MsgID} }()
+			replyComment(reply)
+		}()
+	}
+	return true
+}
+
+func nextReplyBatch() []db.CommStruct {
+	inFlight := map[int]string{}
+	replies := nextOwnerReplyBatch(inFlight)
+	return append(replies, nextNormalReplyBatch(inFlight)...)
+}
+
+func nextOwnerReplyBatch(inFlight map[int]string) []db.CommStruct {
+	return selectReplyBatch(db.GetCommByUserIDs(ownerIDs(), 0), inFlight, 0, replyKindOwner)
+}
+
+func nextNormalReplyBatch(inFlight map[int]string) []db.CommStruct {
+	slots := replyThreadLimit() - activeReplyCount(inFlight, replyKindNormal)
+	if slots <= 0 {
+		return nil
+	}
+	fetchLimit := slots + activeReplyCount(inFlight, replyKindNormal)
+	return selectReplyBatch(db.GetCommExcludingUserIDs(ownerIDs(), fetchLimit), inFlight, slots, replyKindNormal)
 }
 
 func replyThreadLimit() int {
@@ -298,49 +330,39 @@ func replyThreadLimit() int {
 	return MaxReplyThreads
 }
 
-func selectReplyBatch(candidates []db.CommStruct) []db.CommStruct {
-	threadLimit := replyThreadLimit()
-	ownerReplies := make([]db.CommStruct, 0, threadLimit)
-	var normalReply *db.CommStruct
+func selectReplyBatch(candidates []db.CommStruct, inFlight map[int]string, limit int, kind string) []db.CommStruct {
+	capacity := limit
+	if capacity <= 0 {
+		capacity = len(candidates)
+	}
+	replies := make([]db.CommStruct, 0, capacity)
 	for _, candidate := range candidates {
-		candidate := candidate
-		if IsOwner(candidate.Uid) {
-			if len(ownerReplies) < threadLimit {
-				ownerReplies = append(ownerReplies, candidate)
-			}
+		if _, ok := inFlight[candidate.MsgID]; ok {
 			continue
 		}
-		if normalReply == nil {
-			normalReply = &candidate
+		isOwner := IsOwner(candidate.Uid)
+		if kind == replyKindOwner && !isOwner {
+			continue
+		}
+		if kind == replyKindNormal && isOwner {
+			continue
+		}
+		replies = append(replies, candidate)
+		if limit > 0 && len(replies) >= limit {
+			break
 		}
 	}
-	if len(ownerReplies) > 0 {
-		return ownerReplies
-	}
-	if normalReply != nil {
-		return []db.CommStruct{*normalReply}
-	}
-	return nil
+	return replies
 }
 
-func replyWorkerCount(replies []db.CommStruct) int {
-	if len(replies) <= 1 {
-		return len(replies)
-	}
-	workerCount := replyThreadLimit()
-	if workerCount > len(replies) {
-		return len(replies)
-	}
-	return workerCount
-}
-
-func replyBatchType(replies []db.CommStruct) string {
-	for _, reply := range replies {
-		if IsOwner(reply.Uid) {
-			return "owner"
+func activeReplyCount(inFlight map[int]string, kind string) int {
+	count := 0
+	for _, activeKind := range inFlight {
+		if activeKind == kind {
+			count++
 		}
 	}
-	return "普通用户"
+	return count
 }
 
 func appendOwnerContext(contents []ai.Content, userID int) []ai.Content {
