@@ -251,8 +251,8 @@ func saveInboundMessageFromApp(v Msg) {
 		RootCommentID: int64(v.RootCommentID),
 		CommentID:     int64(v.CommentID),
 		UserID:        int64(v.UserID),
-		UserName:      v.UserName,
-		Text:          v.CommentText,
+		UserName:      NormalizeCommentText(v.UserName),
+		Text:          NormalizeCommentText(v.CommentText),
 		CreatedAt:     time.Now().Unix(),
 	})
 }
