@@ -311,15 +311,12 @@ func resolveXHHImageURL(ctx context.Context, imageResult ai.ImageResult, dryRun 
 	}
 
 	mode := strings.ToLower(strings.TrimSpace(config.ConfigStruct.Image.UploadMode))
+	if mode == "external" || mode == "static" {
+		// 临时停用 VPS external/static 图床，统一走小黑盒官方 COS。
+		mode = "cos"
+	}
 	if mode == "" || mode == "xhh_cos" || mode == "xhh-cos" || mode == "cos" {
 		plan, err := UploadToXHHCOS(ctx, imageBytes, imageResult.Path, dryRun)
-		if err != nil {
-			return "", plan, err
-		}
-		return plan.CDNURL, plan, nil
-	}
-	if mode == "external" || mode == "static" {
-		plan, err := UploadToExternalImageHost(imageBytes, imageResult.Path, dryRun)
 		if err != nil {
 			return "", plan, err
 		}

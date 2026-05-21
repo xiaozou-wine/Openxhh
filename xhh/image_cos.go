@@ -58,25 +58,8 @@ func PlanXHHCOSUpload(imageBytes []byte, sourcePath string, now time.Time) XHHCO
 }
 
 func UploadToXHHCOS(ctx context.Context, imageBytes []byte, sourcePath string, dryRun bool) (XHHCOSUploadPlan, error) {
-	plan := PlanXHHCOSUpload(imageBytes, sourcePath, time.Now())
-	plan.DryRun = dryRun
-	if dryRun {
-		return plan, nil
-	}
-
-	mimeType := imageMimeType(imageBytes)
-	tokenPlan, authorization, securityToken, err := requestXHHCOSUploadToken(plan.Key, mimeType, len(imageBytes))
-	if err != nil {
-		return plan, err
-	}
-	plan = tokenPlan
-	plan.Size = len(imageBytes)
-
-	if err := putXHHCOSObject(ctx, plan.UploadURL, mimeType, imageBytes, authorization, securityToken); err != nil {
-		return plan, err
-	}
-	plan.Uploaded = true
-	return plan, nil
+	// 临时切到官方 info/token/STS 签名流程，旧 token header 直传逻辑保留在下方未调用。
+	return UploadToXHHCOSOfficial(ctx, imageBytes, sourcePath, dryRun)
 }
 
 func requestXHHCOSUploadToken(key, mimeType string, size int) (XHHCOSUploadPlan, string, string, error) {
