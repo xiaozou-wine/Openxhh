@@ -51,6 +51,12 @@ type messageStreamTrackResult struct {
 	Saved                int
 }
 
+type trackedFloorCandidate struct {
+	Comments     []CommentInfo
+	RootID       int
+	BotCommentID int
+}
+
 func trackOutboundReplies(outbound db.OutboundMessage) messageStreamTrackResult {
 	comments, rootID, botCommentID, ok := trackedFloorComments(outbound)
 	if !ok || rootID <= 0 {
@@ -68,8 +74,9 @@ func trackOutboundReplies(outbound db.OutboundMessage) messageStreamTrackResult 
 	if outbound.CommentID <= 0 {
 		db.UpdateOutboundMessageComment(outbound.UniqueKey, int64(botCommentID), int64(rootID))
 	}
+	trackedComments := trackedInboundCommentIDs(comments, rootID, botCommentID, outbound)
 	for _, comment := range comments {
-		if !shouldSaveTrackedInbound(comment, rootID, botCommentID, outbound) {
+		if !trackedComments[comment.CommentID] {
 			continue
 		}
 		source := "reply_to_bot"
@@ -101,6 +108,7 @@ func trackedFloorComments(outbound db.OutboundMessage) ([]CommentInfo, int, int,
 		return nil, 0, 0, false
 	}
 	maxPage := 1
+	var unanchoredBotFloors []trackedFloorCandidate
 	for page := 1; page <= maxPage && page <= maxMessagePages; page++ {
 		resp, ok := fetchLinkInfoPage(int(outbound.LinkID), page)
 		if !ok {
@@ -120,11 +128,18 @@ func trackedFloorComments(outbound db.OutboundMessage) ([]CommentInfo, int, int,
 			if botComment := findTrackedBotComment(comments, outbound); botComment != nil {
 				return comments, rootID, botComment.CommentID, true
 			}
+			if botComment := findUnanchoredTopLevelBotComment(comments, outbound); botComment != nil {
+				unanchoredBotFloors = append(unanchoredBotFloors, trackedFloorCandidate{Comments: comments, RootID: rootID, BotCommentID: botComment.CommentID})
+			}
 			botCommentID := int(outbound.CommentID)
 			if outbound.RootCommentID > 0 && rootID == int(outbound.RootCommentID) {
 				return comments, rootID, botCommentID, true
 			}
 		}
+	}
+	if len(unanchoredBotFloors) == 1 {
+		candidate := unanchoredBotFloors[0]
+		return candidate.Comments, candidate.RootID, candidate.BotCommentID, true
 	}
 	return nil, 0, 0, false
 }
@@ -169,8 +184,8 @@ func findOutboundCommentByBotIdentity(comments []CommentInfo, outbound db.Outbou
 	if outbound.RootCommentID <= 0 && outbound.ReplyCommentID <= 0 {
 		return nil
 	}
-	botID, err := strconv.Atoi(Info.HeyBoxId)
-	if err != nil || botID <= 0 {
+	botID, ok := messageStreamBotID()
+	if !ok {
 		return nil
 	}
 	var matches []*CommentInfo
@@ -189,26 +204,69 @@ func findOutboundCommentByBotIdentity(comments []CommentInfo, outbound db.Outbou
 	return nil
 }
 
+func findUnanchoredTopLevelBotComment(comments []CommentInfo, outbound db.OutboundMessage) *CommentInfo {
+	if outbound.CommentID > 0 || outbound.RootCommentID > 0 || outbound.ReplyCommentID > 0 || len(comments) == 0 {
+		return nil
+	}
+	botID, ok := messageStreamBotID()
+	if !ok {
+		return nil
+	}
+	root := &comments[0]
+	if root.CommentID <= 0 || root.UserID != botID || root.ReplyID != 0 {
+		return nil
+	}
+	return root
+}
+
+func messageStreamBotID() (int, bool) {
+	botID, err := strconv.Atoi(Info.HeyBoxId)
+	return botID, err == nil && botID > 0
+}
+
+func trackedInboundCommentIDs(comments []CommentInfo, rootID int, botCommentID int, outbound db.OutboundMessage) map[int]bool {
+	tracked := map[int]bool{}
+	if botCommentID <= 0 {
+		return tracked
+	}
+	if rootID == botCommentID {
+		for _, comment := range comments {
+			if isTrackableInboundComment(comment, botCommentID, outbound) {
+				tracked[comment.CommentID] = true
+			}
+		}
+		return tracked
+	}
+	related := map[int]bool{botCommentID: true}
+	for changed := true; changed; {
+		changed = false
+		for _, comment := range comments {
+			if tracked[comment.CommentID] || !isTrackableInboundComment(comment, botCommentID, outbound) {
+				continue
+			}
+			if !related[comment.ReplyID] {
+				continue
+			}
+			tracked[comment.CommentID] = true
+			related[comment.CommentID] = true
+			changed = true
+		}
+	}
+	return tracked
+}
+
 func shouldSaveTrackedInbound(comment CommentInfo, rootID int, botCommentID int, outbound db.OutboundMessage) bool {
+	return trackedInboundCommentIDs([]CommentInfo{comment}, rootID, botCommentID, outbound)[comment.CommentID]
+}
+
+func isTrackableInboundComment(comment CommentInfo, botCommentID int, outbound db.OutboundMessage) bool {
 	if comment.CommentID <= 0 || comment.CommentID == botCommentID {
 		return false
 	}
 	if Info.HeyBoxId != "" && strconv.Itoa(comment.UserID) == Info.HeyBoxId {
 		return false
 	}
-	if normalizeMessageStreamText(comment.Text) == normalizeMessageStreamText(outbound.Text) {
-		return false
-	}
-	if botCommentID <= 0 {
-		return false
-	}
-	if comment.ReplyID == botCommentID {
-		return true
-	}
-	if rootID == botCommentID && comment.CommentID != botCommentID {
-		return true
-	}
-	return false
+	return normalizeMessageStreamText(comment.Text) != normalizeMessageStreamText(outbound.Text)
 }
 
 func normalizeMessageStreamText(text string) string {

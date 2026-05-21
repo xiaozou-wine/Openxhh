@@ -60,6 +60,32 @@ func TestFindTrackedBotCommentDoesNotGuessWithoutAnchor(t *testing.T) {
 	}
 }
 
+func TestFindUnanchoredTopLevelBotComment(t *testing.T) {
+	oldHeyBoxID := Info.HeyBoxId
+	Info.HeyBoxId = "42"
+	t.Cleanup(func() { Info.HeyBoxId = oldHeyBoxID })
+
+	comments := []CommentInfo{
+		{CommentID: 50, UserID: 42, Text: "机器人顶级评论"},
+		{CommentID: 51, UserID: 7, ReplyID: 50, Text: "未 @ 普通评论"},
+	}
+	got := findUnanchoredTopLevelBotComment(comments, db.OutboundMessage{Text: "原始机器人回复"})
+	if got == nil || got.CommentID != 50 {
+		t.Fatalf("findUnanchoredTopLevelBotComment = %#v, want comment 50", got)
+	}
+}
+
+func TestFindUnanchoredTopLevelBotCommentSkipsChildBotComment(t *testing.T) {
+	oldHeyBoxID := Info.HeyBoxId
+	Info.HeyBoxId = "42"
+	t.Cleanup(func() { Info.HeyBoxId = oldHeyBoxID })
+
+	comments := []CommentInfo{{CommentID: 52, UserID: 42, ReplyID: 10, Text: "机器人楼中楼评论"}}
+	if got := findUnanchoredTopLevelBotComment(comments, db.OutboundMessage{Text: "原始机器人回复"}); got != nil {
+		t.Fatalf("findUnanchoredTopLevelBotComment = %#v, want nil", got)
+	}
+}
+
 func TestShouldSaveTrackedInboundForReplyToBot(t *testing.T) {
 	oldHeyBoxID := Info.HeyBoxId
 	Info.HeyBoxId = "42"
@@ -70,6 +96,27 @@ func TestShouldSaveTrackedInboundForReplyToBot(t *testing.T) {
 
 	if !shouldSaveTrackedInbound(comment, 10, 60, outbound) {
 		t.Fatal("shouldSaveTrackedInbound should save reply to bot")
+	}
+}
+
+func TestTrackedInboundCommentIDsIncludesNestedRepliesToBotThread(t *testing.T) {
+	oldHeyBoxID := Info.HeyBoxId
+	Info.HeyBoxId = "42"
+	t.Cleanup(func() { Info.HeyBoxId = oldHeyBoxID })
+
+	comments := []CommentInfo{
+		{CommentID: 60, UserID: 42, ReplyID: 10, Text: "机器人回复"},
+		{CommentID: 61, UserID: 7, ReplyID: 60, Text: "直接回复机器人"},
+		{CommentID: 62, UserID: 8, ReplyID: 61, Text: "楼中楼里继续评论"},
+		{CommentID: 63, UserID: 9, ReplyID: 10, Text: "同层楼但不是这条对话链"},
+	}
+	tracked := trackedInboundCommentIDs(comments, 10, 60, db.OutboundMessage{Text: "机器人回复"})
+
+	if !tracked[61] || !tracked[62] {
+		t.Fatalf("tracked = %#v, want direct and nested replies", tracked)
+	}
+	if tracked[63] {
+		t.Fatalf("tracked = %#v, should not include unrelated same-floor comment", tracked)
 	}
 }
 
