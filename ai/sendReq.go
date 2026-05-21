@@ -202,6 +202,10 @@ func buildReqPayloads(Model string, Msg []any) ([]aiRequestPayload, error) {
 }
 
 func buildResponsesReqBody(Model string, Msg []any, legacy bool) ([]byte, error) {
+	return buildResponsesReqBodyWithTools(Model, Msg, legacy, aiWebSearchEnabled())
+}
+
+func buildResponsesReqBodyWithTools(Model string, Msg []any, legacy bool, includeWebSearch bool) ([]byte, error) {
 	var body responsesBodyStruct
 	if legacy {
 		input, err := toResponsesInput(Msg)
@@ -213,7 +217,7 @@ func buildResponsesReqBody(Model string, Msg []any, legacy bool) ([]byte, error)
 			Input:  input,
 			Stream: false,
 		}
-		if aiWebSearchEnabled() {
+		if includeWebSearch {
 			body.Tools = []responsesWebTool{{Type: legacyResponsesWebSearchToolType, SearchContextSize: aiSearchContextSize()}}
 			if aiForceWebSearchEnabled() {
 				body.ToolChoice = "required"
@@ -232,7 +236,7 @@ func buildResponsesReqBody(Model string, Msg []any, legacy bool) ([]byte, error)
 		Input:        input,
 		Stream:       false,
 	}
-	if aiWebSearchEnabled() {
+	if includeWebSearch {
 		body.Tools = []responsesWebTool{{Type: responsesWebSearchToolType, SearchContextSize: aiSearchContextSize()}}
 		if aiForceWebSearchEnabled() {
 			body.ToolChoice = "required"

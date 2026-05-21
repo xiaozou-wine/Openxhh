@@ -114,6 +114,55 @@ func TestRefineImagePromptUsesResponsesInput(t *testing.T) {
 	}
 }
 
+func TestRefineImagePromptResponsesFallsBackToCompatPayload(t *testing.T) {
+	oldImage := config.ConfigStruct.Image
+	oldLogger := loger.Loger
+	t.Cleanup(func() {
+		config.ConfigStruct.Image = oldImage
+		loger.Loger = oldLogger
+	})
+	loger.Loger = zap.NewNop()
+
+	attempts := 0
+	var bodies []map[string]json.RawMessage
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		attempts++
+		var body map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		bodies = append(bodies, body)
+		w.Header().Set("Content-Type", "application/json")
+		if attempts == 1 {
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte(`{"error":{"message":"openai_error","type":"bad_response_status_code"}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"output_text":"{\"image_prompt\":\"兼容猫娘海报\",\"mention_target\":\"\",\"needs_post_context\":false,\"needs_comment_context\":false,\"needs_image_input\":true}","usage":{"total_tokens":5}}`))
+	}))
+	defer server.Close()
+
+	config.ConfigStruct.Image.PromptRefine = true
+	config.ConfigStruct.Image.PromptModel = "prompt-model"
+	config.ConfigStruct.Image.PromptBaseUrl = server.URL + "/v1/responses"
+
+	got, err := RefineImagePrompt(context.Background(), ImagePromptRefineRequest{OriginalText: "根据这张图生成海报", RulePrompt: "根据参考图片生成类似图片", ContextPrompt: "参考图是一只猫", UseImageInput: true})
+	if err != nil {
+		t.Fatalf("RefineImagePrompt returned error: %v", err)
+	}
+	if got.ImagePrompt != "兼容猫娘海报" || !got.NeedsImageInput {
+		t.Fatalf("result = %+v", got)
+	}
+	if attempts != 2 || len(bodies) != 2 {
+		t.Fatalf("attempts = %d, bodies = %d", attempts, len(bodies))
+	}
+	if _, ok := bodies[1]["instructions"]; ok {
+		t.Fatalf("compat body should not include instructions: %s", string(bodies[1]["instructions"]))
+	}
+}
+
 func TestLimitRefineRunes(t *testing.T) {
 	got := limitRefineRunes("猫猫猫", 2)
 	if got != "猫猫" {

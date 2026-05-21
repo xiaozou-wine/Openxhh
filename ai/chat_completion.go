@@ -26,20 +26,28 @@ func sendChatCompletion(ctx context.Context, model string, messages []chatComple
 		return "", errors.New("model is empty")
 	}
 	useResponses := useResponsesAPI(config.ConfigStruct.Ai.BaseUrl)
-	payload, err := buildChatCompletionPayload(model, messages, useResponses)
+	payloads, err := buildChatCompletionPayloads(model, messages, useResponses)
 	if err != nil {
 		return "", err
 	}
 
 	var lastErr error
 	for attempt := 1; attempt <= chatCompletionAttempts; attempt++ {
-		content, err := sendChatCompletionOnce(ctx, payload, useResponses)
-		if err == nil {
-			return content, nil
+		var retryErr error
+		for i, payload := range payloads {
+			content, err := sendChatCompletionOnce(ctx, payload.Body, useResponses)
+			if err == nil {
+				return content, nil
+			}
+			lastErr = err
+			retryErr = err
+			if useResponses && i < len(payloads)-1 && shouldTryNextChatCompletionPayload(err) {
+				continue
+			}
+			break
 		}
-		lastErr = err
-		if !shouldRetryChatCompletionError(err) || attempt == chatCompletionAttempts {
-			return "", err
+		if !shouldRetryChatCompletionError(retryErr) || attempt == chatCompletionAttempts {
+			return "", retryErr
 		}
 		if err := waitForChatCompletionRetry(ctx, attempt); err != nil {
 			return "", err
@@ -49,22 +57,28 @@ func sendChatCompletion(ctx context.Context, model string, messages []chatComple
 }
 
 func buildChatCompletionPayload(model string, messages []chatCompletionMessage, useResponses bool) ([]byte, error) {
+	payloads, err := buildChatCompletionPayloads(model, messages, useResponses)
+	if err != nil || len(payloads) == 0 {
+		return nil, err
+	}
+	return payloads[0].Body, nil
+}
+
+func buildChatCompletionPayloads(model string, messages []chatCompletionMessage, useResponses bool) ([]aiRequestPayload, error) {
 	if useResponses {
 		rawMessages := make([]any, 0, len(messages))
 		for _, message := range messages {
 			rawMessages = append(rawMessages, message)
 		}
-		instructions, input, err := toResponsesPayloadParts(rawMessages)
+		primary, err := buildResponsesReqBodyWithTools(model, rawMessages, false, false)
 		if err != nil {
 			return nil, err
 		}
-		body := responsesBodyStruct{
-			Model:        model,
-			Instructions: instructions,
-			Input:        input,
-			Stream:       false,
+		legacy, err := buildResponsesReqBodyWithTools(model, rawMessages, true, false)
+		if err != nil {
+			return nil, err
 		}
-		return json.Marshal(body)
+		return []aiRequestPayload{{Name: "responses", Body: primary}, {Name: "responses_compat", Body: legacy}}, nil
 	}
 
 	body := struct {
@@ -76,7 +90,11 @@ func buildChatCompletionPayload(model string, messages []chatCompletionMessage, 
 		Messages: messages,
 		Stream:   false,
 	}
-	return json.Marshal(body)
+	data, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	return []aiRequestPayload{{Name: "chat_completions", Body: data}}, nil
 }
 
 func sendChatCompletionOnce(ctx context.Context, payload []byte, useResponses bool) (string, error) {
@@ -129,6 +147,11 @@ type chatCompletionStatusError struct {
 
 func (e chatCompletionStatusError) Error() string {
 	return fmt.Sprintf("chat completion request failed: status=%d body=%s", e.statusCode, e.body)
+}
+
+func shouldTryNextChatCompletionPayload(err error) bool {
+	var statusErr chatCompletionStatusError
+	return errors.As(err, &statusErr) && shouldTryNextResponsesPayload(statusErr.statusCode)
 }
 
 func shouldRetryChatCompletionError(err error) bool {

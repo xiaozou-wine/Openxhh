@@ -63,7 +63,7 @@ func RefineImagePrompt(ctx context.Context, req ImagePromptRefineRequest) (Image
 	}
 
 	useResponses := useResponsesAPI(promptRefineBaseURL())
-	payload, err := buildImagePromptRefinePayload(req, useResponses)
+	payloads, err := buildImagePromptRefinePayloads(req, useResponses)
 	if err != nil {
 		return ImagePromptRefineResult{}, err
 	}
@@ -71,14 +71,22 @@ func RefineImagePrompt(ctx context.Context, req ImagePromptRefineRequest) (Image
 	started := time.Now()
 	var lastErr error
 	for attempt := 1; attempt <= chatCompletionAttempts; attempt++ {
-		result, err := refineImagePromptOnce(ctx, payload, useResponses)
-		if err == nil {
-			loger.Loger.Info("[Image]文本模型已优化生图 prompt", zap.Int("prompt_chars", len([]rune(result.ImagePrompt))), zap.Duration("duration", time.Since(started)))
-			return result, nil
+		var retryErr error
+		for i, payload := range payloads {
+			result, err := refineImagePromptOnce(ctx, payload.Body, useResponses)
+			if err == nil {
+				loger.Loger.Info("[Image]文本模型已优化生图 prompt", zap.Int("prompt_chars", len([]rune(result.ImagePrompt))), zap.Duration("duration", time.Since(started)))
+				return result, nil
+			}
+			lastErr = err
+			retryErr = err
+			if useResponses && i < len(payloads)-1 && shouldTryNextChatCompletionPayload(err) {
+				continue
+			}
+			break
 		}
-		lastErr = err
-		if !shouldRetryChatCompletionError(err) || attempt == chatCompletionAttempts {
-			return ImagePromptRefineResult{}, fmt.Errorf("prompt refine request failed after %s: %w", time.Since(started).Round(time.Second), err)
+		if !shouldRetryChatCompletionError(retryErr) || attempt == chatCompletionAttempts {
+			return ImagePromptRefineResult{}, fmt.Errorf("prompt refine request failed after %s: %w", time.Since(started).Round(time.Second), retryErr)
 		}
 		if err := waitForChatCompletionRetry(ctx, attempt); err != nil {
 			return ImagePromptRefineResult{}, err
@@ -88,6 +96,14 @@ func RefineImagePrompt(ctx context.Context, req ImagePromptRefineRequest) (Image
 }
 
 func buildImagePromptRefinePayload(req ImagePromptRefineRequest, useResponses bool) ([]byte, error) {
+	payloads, err := buildImagePromptRefinePayloads(req, useResponses)
+	if err != nil || len(payloads) == 0 {
+		return nil, err
+	}
+	return payloads[0].Body, nil
+}
+
+func buildImagePromptRefinePayloads(req ImagePromptRefineRequest, useResponses bool) ([]aiRequestPayload, error) {
 	messages := []promptRefineMessage{
 		{Role: "system", Content: imagePromptRefineSystemPrompt()},
 		{Role: "user", Content: buildImagePromptRefineUserPrompt(req)},
@@ -97,17 +113,15 @@ func buildImagePromptRefinePayload(req ImagePromptRefineRequest, useResponses bo
 		for _, message := range messages {
 			rawMessages = append(rawMessages, message)
 		}
-		instructions, input, err := toResponsesPayloadParts(rawMessages)
+		primary, err := buildResponsesReqBodyWithTools(promptRefineModel(), rawMessages, false, false)
 		if err != nil {
 			return nil, err
 		}
-		body := responsesBodyStruct{
-			Model:        promptRefineModel(),
-			Instructions: instructions,
-			Input:        input,
-			Stream:       false,
+		legacy, err := buildResponsesReqBodyWithTools(promptRefineModel(), rawMessages, true, false)
+		if err != nil {
+			return nil, err
 		}
-		return json.Marshal(body)
+		return []aiRequestPayload{{Name: "responses", Body: primary}, {Name: "responses_compat", Body: legacy}}, nil
 	}
 
 	body := promptRefineBody{
@@ -115,7 +129,11 @@ func buildImagePromptRefinePayload(req ImagePromptRefineRequest, useResponses bo
 		Stream:   false,
 		Messages: messages,
 	}
-	return json.Marshal(body)
+	data, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	return []aiRequestPayload{{Name: "chat_completions", Body: data}}, nil
 }
 
 func refineImagePromptOnce(ctx context.Context, payload []byte, useResponses bool) (ImagePromptRefineResult, error) {

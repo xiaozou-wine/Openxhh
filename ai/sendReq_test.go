@@ -199,6 +199,58 @@ func TestSendReqResponsesFallsBackToCompatPayload(t *testing.T) {
 	}
 }
 
+func TestSendChatCompletionResponsesFallsBackToCompatPayload(t *testing.T) {
+	restoreAIConfig(t)
+
+	attempts := 0
+	var bodies []map[string]json.RawMessage
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		attempts++
+		var body map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		bodies = append(bodies, body)
+		w.Header().Set("Content-Type", "application/json")
+		if attempts == 1 {
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte(`{"error":{"message":"openai_error","type":"bad_response_status_code"}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"output_text":"route-ok","usage":{"total_tokens":4}}`))
+	}))
+	defer server.Close()
+
+	config.ConfigStruct.Ai.BaseUrl = server.URL + "/v1/responses"
+	got, err := sendChatCompletion(context.Background(), "route-model", []chatCompletionMessage{
+		{Role: "system", Content: "system prompt"},
+		{Role: "user", Content: "hello"},
+	})
+	if err != nil {
+		t.Fatalf("sendChatCompletion returned error: %v", err)
+	}
+	if got != "route-ok" {
+		t.Fatalf("response text = %q, want route-ok", got)
+	}
+	if attempts != 2 || len(bodies) != 2 {
+		t.Fatalf("attempts = %d, bodies = %d", attempts, len(bodies))
+	}
+	if _, ok := bodies[1]["instructions"]; ok {
+		t.Fatalf("compat body should not include instructions: %s", string(bodies[1]["instructions"]))
+	}
+	var input []struct {
+		Role string `json:"role"`
+	}
+	if err := json.Unmarshal(mustRawMessage(t, bodies[1], "input"), &input); err != nil {
+		t.Fatalf("compat input: %v", err)
+	}
+	if len(input) != 2 || input[0].Role != "developer" || input[1].Role != "user" {
+		t.Fatalf("compat input = %+v", input)
+	}
+}
+
 func mustRawMessage(t *testing.T, body map[string]json.RawMessage, key string) json.RawMessage {
 	t.Helper()
 	value, ok := body[key]
