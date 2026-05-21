@@ -132,19 +132,27 @@ type feedReplyRecord struct {
 }
 
 type messageStreamRecord struct {
-	Direction      string `json:"direction"`
-	Source         string `json:"source"`
-	MessageID      int64  `json:"messageId"`
-	LinkID         int64  `json:"linkId"`
-	RootCommentID  int64  `json:"rootCommentId"`
-	ReplyCommentID int64  `json:"replyCommentId"`
-	CommentID      int64  `json:"commentId"`
-	UserID         int64  `json:"userId"`
-	UserName       string `json:"userName"`
-	Text           string `json:"text"`
-	ImageURL       string `json:"imageUrl"`
-	CreatedAt      int64  `json:"createdAt"`
-	UniqueKey      string `json:"uniqueKey"`
+	Direction       string `json:"direction"`
+	Source          string `json:"source"`
+	MessageID       int64  `json:"messageId"`
+	LinkID          int64  `json:"linkId"`
+	RootCommentID   int64  `json:"rootCommentId"`
+	ReplyCommentID  int64  `json:"replyCommentId"`
+	CommentID       int64  `json:"commentId"`
+	UserID          int64  `json:"userId"`
+	UserName        string `json:"userName"`
+	Text            string `json:"text"`
+	ImageURL        string `json:"imageUrl"`
+	CreatedAt       int64  `json:"createdAt"`
+	UniqueKey       string `json:"uniqueKey"`
+	PostTitle       string `json:"postTitle"`
+	CommentUserName string `json:"commentUserName"`
+}
+
+type messageStreamPostInfo struct {
+	Title           string
+	Author          string
+	CommentUserName string
 }
 
 type commentThreadRequest struct {
@@ -215,6 +223,9 @@ type xhhPostCommentsResponse struct {
 		TotalPage int `json:"total_page"`
 		Link      struct {
 			Title string `json:"title"`
+			User  struct {
+				UserName string `json:"username"`
+			} `json:"user"`
 		} `json:"link"`
 	} `json:"result"`
 }
@@ -2018,6 +2029,7 @@ func (s *serverState) handleMessageStream(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
+	outbound = s.enrichOutboundMessageStream(r.Context(), cfg, outbound)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "outbound": outbound, "inbound": inbound})
 }
 
@@ -2130,6 +2142,221 @@ func (s *serverState) readMessageStreamRecords(cfg appConfig, recentOnly bool) (
 		return readPostgresMessageStreamRecords(cfg, recentOnly)
 	default:
 		return nil, nil, fmt.Errorf("不支持的数据库类型: %s", cfg.DataBase.Type)
+	}
+}
+
+func (s *serverState) enrichOutboundMessageStream(ctx context.Context, cfg appConfig, records []messageStreamRecord) []messageStreamRecord {
+	if len(records) == 0 {
+		return records
+	}
+	postInfo := map[int64]messageStreamPostInfo{}
+	commentUsers := map[int64]string{}
+	_ = s.fillLocalMessageStreamInfo(cfg, messageStreamLinkIDs(records), messageStreamReplyCommentIDs(records), postInfo, commentUsers)
+	s.fillXHHMessageStreamInfo(ctx, cfg, records, postInfo, commentUsers)
+	for i := range records {
+		info := postInfo[records[i].LinkID]
+		records[i].PostTitle = cleanXHHCommentText(info.Title)
+		if records[i].ReplyCommentID > 0 {
+			records[i].CommentUserName = cleanXHHCommentText(commentUsers[records[i].ReplyCommentID])
+		}
+		if records[i].CommentUserName == "" && records[i].ReplyCommentID <= 0 {
+			records[i].CommentUserName = cleanXHHCommentText(info.Author)
+		}
+	}
+	return records
+}
+
+func messageStreamLinkIDs(records []messageStreamRecord) []int64 {
+	set := map[int64]struct{}{}
+	for _, record := range records {
+		if record.LinkID > 0 {
+			set[record.LinkID] = struct{}{}
+		}
+	}
+	return int64SetValues(set)
+}
+
+func messageStreamReplyCommentIDs(records []messageStreamRecord) []int64 {
+	set := map[int64]struct{}{}
+	for _, record := range records {
+		if record.ReplyCommentID > 0 {
+			set[record.ReplyCommentID] = struct{}{}
+		}
+	}
+	return int64SetValues(set)
+}
+
+func (s *serverState) fillLocalMessageStreamInfo(cfg appConfig, linkIDs []int64, replyCommentIDs []int64, postInfo map[int64]messageStreamPostInfo, commentUsers map[int64]string) error {
+	switch strings.ToLower(strings.TrimSpace(cfg.DataBase.Type)) {
+	case "", "sqlite":
+		return s.fillSQLiteMessageStreamInfo(linkIDs, replyCommentIDs, postInfo, commentUsers)
+	case "pg", "postgres", "postgresql":
+		return fillPostgresMessageStreamInfo(cfg, linkIDs, replyCommentIDs, postInfo, commentUsers)
+	default:
+		return nil
+	}
+}
+
+func (s *serverState) fillSQLiteMessageStreamInfo(linkIDs []int64, replyCommentIDs []int64, postInfo map[int64]messageStreamPostInfo, commentUsers map[int64]string) error {
+	if _, err := os.Stat(filepath.Join(s.rootDir, "sql.db")); err != nil {
+		return nil
+	}
+	database, err := s.openSQLiteDatabase()
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+	if err := fillSQLiteMessageStreamFeedInfo(database, linkIDs, postInfo); err != nil {
+		return err
+	}
+	return fillSQLiteMessageStreamCommentUsers(database, replyCommentIDs, commentUsers)
+}
+
+func fillSQLiteMessageStreamFeedInfo(database *sql.DB, linkIDs []int64, postInfo map[int64]messageStreamPostInfo) error {
+	if len(linkIDs) == 0 {
+		return nil
+	}
+	query := "SELECT link_id, COALESCE(title, ''), COALESCE(author_name, '') FROM feed_reply_records WHERE link_id IN (" + sqlitePlaceholders(len(linkIDs)) + ")"
+	rows, err := database.Query(query, int64Args(linkIDs)...)
+	if err != nil {
+		if isMissingFeedReplyTable(err) {
+			return nil
+		}
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var linkID int64
+		var title, author string
+		if err := rows.Scan(&linkID, &title, &author); err != nil {
+			return err
+		}
+		info := postInfo[linkID]
+		info.Title = firstNonEmpty(info.Title, title)
+		info.Author = firstNonEmpty(info.Author, author)
+		postInfo[linkID] = info
+	}
+	return rows.Err()
+}
+
+func fillSQLiteMessageStreamCommentUsers(database *sql.DB, replyCommentIDs []int64, commentUsers map[int64]string) error {
+	if len(replyCommentIDs) == 0 {
+		return nil
+	}
+	query := "SELECT comment_a_id, COALESCE(user_a_name, '') FROM at WHERE comment_a_id IN (" + sqlitePlaceholders(len(replyCommentIDs)) + ")"
+	rows, err := database.Query(query, int64Args(replyCommentIDs)...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var commentID int64
+		var userName string
+		if err := rows.Scan(&commentID, &userName); err != nil {
+			return err
+		}
+		if commentID > 0 && strings.TrimSpace(userName) != "" {
+			commentUsers[commentID] = userName
+		}
+	}
+	return rows.Err()
+}
+
+func fillPostgresMessageStreamInfo(cfg appConfig, linkIDs []int64, replyCommentIDs []int64, postInfo map[int64]messageStreamPostInfo, commentUsers map[int64]string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, postgresDSN(cfg))
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	if err := fillPostgresMessageStreamFeedInfo(ctx, pool, linkIDs, postInfo); err != nil {
+		return err
+	}
+	return fillPostgresMessageStreamCommentUsers(ctx, pool, replyCommentIDs, commentUsers)
+}
+
+func fillPostgresMessageStreamFeedInfo(ctx context.Context, pool *pgxpool.Pool, linkIDs []int64, postInfo map[int64]messageStreamPostInfo) error {
+	if len(linkIDs) == 0 {
+		return nil
+	}
+	query := "SELECT link_id, COALESCE(title, ''), COALESCE(author_name, '') FROM feed_reply_records WHERE link_id IN (" + postgresPlaceholders(len(linkIDs)) + ")"
+	rows, err := pool.Query(ctx, query, int64Args(linkIDs)...)
+	if err != nil {
+		if isMissingFeedReplyTable(err) {
+			return nil
+		}
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var linkID int64
+		var title, author string
+		if err := rows.Scan(&linkID, &title, &author); err != nil {
+			return err
+		}
+		info := postInfo[linkID]
+		info.Title = firstNonEmpty(info.Title, title)
+		info.Author = firstNonEmpty(info.Author, author)
+		postInfo[linkID] = info
+	}
+	return rows.Err()
+}
+
+func fillPostgresMessageStreamCommentUsers(ctx context.Context, pool *pgxpool.Pool, replyCommentIDs []int64, commentUsers map[int64]string) error {
+	if len(replyCommentIDs) == 0 {
+		return nil
+	}
+	query := "SELECT comment_a_id, COALESCE(user_a_name, '') FROM at WHERE comment_a_id IN (" + postgresPlaceholders(len(replyCommentIDs)) + ")"
+	rows, err := pool.Query(ctx, query, int64Args(replyCommentIDs)...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var commentID int64
+		var userName string
+		if err := rows.Scan(&commentID, &userName); err != nil {
+			return err
+		}
+		if commentID > 0 && strings.TrimSpace(userName) != "" {
+			commentUsers[commentID] = userName
+		}
+	}
+	return rows.Err()
+}
+
+func (s *serverState) fillXHHMessageStreamInfo(ctx context.Context, cfg appConfig, records []messageStreamRecord, postInfo map[int64]messageStreamPostInfo, commentUsers map[int64]string) {
+	session := s.loadXHHSession()
+	fetched := map[int64]struct{}{}
+	for _, record := range records {
+		if record.LinkID <= 0 {
+			continue
+		}
+		info := postInfo[record.LinkID]
+		_, alreadyFetched := fetched[record.LinkID]
+		needsTitle := strings.TrimSpace(info.Title) == ""
+		needsAuthor := record.ReplyCommentID <= 0 && strings.TrimSpace(info.Author) == ""
+		needsCommentUser := record.ReplyCommentID > 0 && strings.TrimSpace(commentUsers[record.ReplyCommentID]) == ""
+		if alreadyFetched || (!needsTitle && !needsAuthor && !needsCommentUser) {
+			continue
+		}
+		payload, err := fetchXHHLinkTreePage(ctx, cfg, session, record.LinkID, 1)
+		if err != nil {
+			fetched[record.LinkID] = struct{}{}
+			continue
+		}
+		info.Title = firstNonEmpty(info.Title, cleanXHHCommentText(payload.Result.Link.Title))
+		info.Author = firstNonEmpty(info.Author, cleanXHHCommentText(payload.Result.Link.User.UserName))
+		postInfo[record.LinkID] = info
+		for _, group := range payload.Result.Comments {
+			for _, comment := range group.Comment {
+				if comment.CommentID > 0 && strings.TrimSpace(comment.User.UserName) != "" {
+					commentUsers[comment.CommentID] = cleanXHHCommentText(comment.User.UserName)
+				}
+			}
+		}
+		fetched[record.LinkID] = struct{}{}
 	}
 }
 
@@ -2993,10 +3220,12 @@ let messageStreamSignature='';
 let feedRecordsSignature='';
 let emojiLibrary={};
 const recordScrollMemory=new Map();
+const activeViewStorageKey='openxhh.webui.activeView';
 
-function showApp(ok){loginView.classList.toggle('hidden',ok);appView.classList.toggle('hidden',!ok);if(ok){switchView('home');bootstrap()}}
+function showApp(ok){loginView.classList.toggle('hidden',ok);appView.classList.toggle('hidden',!ok);if(ok){switchView(savedActiveView());bootstrap()}}
+function savedActiveView(){const name=localStorage.getItem(activeViewStorageKey)||'home';return document.querySelector('#view-'+name)?name:'home'}
 async function api(path,options={}){const res=await fetch(path,{headers:{'Content-Type':'application/json'},credentials:'same-origin',...options});const data=await res.json().catch(()=>({}));if(!res.ok)throw new Error(data.error||'请求失败');return data}
-function switchView(name){const previous=activeView;activeView=name;document.querySelectorAll('.view').forEach(view=>view.classList.toggle('active',view.id==='view-'+name));document.querySelectorAll('.nav').forEach(btn=>btn.classList.toggle('active',btn.dataset.view===name));document.querySelector('#adminMenuBtn')?.classList.toggle('active',name==='settings');const mobile=document.querySelector('#mobileNav');if(mobile&&name!=='settings')mobile.value=name;if(name==='logs'&&previous!=='logs'){logScrollLatestOnce=true;loadCurrentLog()}if(name==='records'){if(recordsMeta)recordsMeta.textContent='正在读取最近24小时机器人评论...';loadAllRecords()}if(name==='inbound-records'){if(inboundRecordsMeta)inboundRecordsMeta.textContent='正在读取最近24小时用户评论...';loadAllRecords()}}
+function switchView(name){const previous=activeView;activeView=name;localStorage.setItem(activeViewStorageKey,name);document.querySelectorAll('.view').forEach(view=>view.classList.toggle('active',view.id==='view-'+name));document.querySelectorAll('.nav').forEach(btn=>btn.classList.toggle('active',btn.dataset.view===name));document.querySelector('#adminMenuBtn')?.classList.toggle('active',name==='settings');const mobile=document.querySelector('#mobileNav');if(mobile&&name!=='settings')mobile.value=name;if(name==='logs'&&previous!=='logs'){logScrollLatestOnce=true;loadCurrentLog()}if(name==='records'){if(recordsMeta)recordsMeta.textContent='正在读取最近24小时机器人评论...';loadAllRecords()}if(name==='inbound-records'){if(inboundRecordsMeta)inboundRecordsMeta.textContent='正在读取最近24小时用户评论...';loadAllRecords()}}
 document.querySelectorAll('[data-view], [data-view-button]').forEach(el=>el.addEventListener('click',()=>switchView(el.dataset.view||el.dataset.viewButton)));
 document.querySelector('#adminMenuBtn')?.addEventListener('click',()=>switchView('settings'));
 document.querySelector('#settingsHomeBtn')?.addEventListener('click',()=>switchView('home'));
