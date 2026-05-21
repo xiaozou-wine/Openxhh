@@ -10,17 +10,19 @@ const defaultFeedReplyPrompt = "你正在作为小黑盒用户回复帖子。请
 
 var ConfigStruct struct {
 	Xhh struct {
-		CheckTime                int    `json:"checkTime"`
-		ReplyTime                int    `json:"replyTime"`
-		MaxReplyThreads          int    `json:"maxReplyThreads"`
-		MaxPendingReplies        int    `json:"maxPendingReplies"`
-		MaxPendingRepliesPerUser int    `json:"maxPendingRepliesPerUser"`
-		EnableWhitelist          bool   `json:"enableWhitelist"`
-		Owner                    string `json:"owner"`
-		DeviceID                 string `json:"deviceID"`
-		BaseUrl                  string `json:"baseUrl"`
-		WebVer                   string `json:"webver"`
-		Ver                      string `json:"version"`
+		CheckTime                   int    `json:"checkTime"`
+		ReplyTime                   int    `json:"replyTime"`
+		MaxReplyThreads             int    `json:"maxReplyThreads"`
+		MaxPendingReplies           int    `json:"maxPendingReplies"`
+		MaxPendingRepliesPerUser    int    `json:"maxPendingRepliesPerUser"`
+		MessageStreamTrackDays      int    `json:"messageStreamTrackDays"`
+		MessageStreamTrackBatchSize int    `json:"messageStreamTrackBatchSize"`
+		EnableWhitelist             bool   `json:"enableWhitelist"`
+		Owner                       string `json:"owner"`
+		DeviceID                    string `json:"deviceID"`
+		BaseUrl                     string `json:"baseUrl"`
+		WebVer                      string `json:"webver"`
+		Ver                         string `json:"version"`
 	} `json:"xhh"`
 	DataBase struct {
 		Type   string `json:"type"`
@@ -115,6 +117,10 @@ func applyDefaults() bool {
 	}
 	if ConfigStruct.Xhh.MaxPendingRepliesPerUser <= 0 {
 		ConfigStruct.Xhh.MaxPendingRepliesPerUser = 5
+		changed = true
+	}
+	if ConfigStruct.Xhh.MessageStreamTrackBatchSize <= 0 {
+		ConfigStruct.Xhh.MessageStreamTrackBatchSize = 120
 		changed = true
 	}
 	if ConfigStruct.Xhh.BaseUrl == "" {

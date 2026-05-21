@@ -1,9 +1,28 @@
 package xhh
 
 import (
+	"openxhh/config"
 	"openxhh/db"
 	"testing"
 )
+
+func TestMessageStreamTrackDefaults(t *testing.T) {
+	oldDays := config.ConfigStruct.Xhh.MessageStreamTrackDays
+	oldBatchSize := config.ConfigStruct.Xhh.MessageStreamTrackBatchSize
+	config.ConfigStruct.Xhh.MessageStreamTrackDays = 0
+	config.ConfigStruct.Xhh.MessageStreamTrackBatchSize = 0
+	t.Cleanup(func() {
+		config.ConfigStruct.Xhh.MessageStreamTrackDays = oldDays
+		config.ConfigStruct.Xhh.MessageStreamTrackBatchSize = oldBatchSize
+	})
+
+	if got := messageStreamTrackSince(); got != 0 {
+		t.Fatalf("messageStreamTrackSince = %d, want 0 for permanent", got)
+	}
+	if got := messageStreamTrackBatchSize(); got != defaultMessageStreamTrackBatchSize {
+		t.Fatalf("messageStreamTrackBatchSize = %d, want %d", got, defaultMessageStreamTrackBatchSize)
+	}
+}
 
 func TestFindTrackedBotCommentUsesCommentID(t *testing.T) {
 	comments := []CommentInfo{

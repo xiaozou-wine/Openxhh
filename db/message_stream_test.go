@@ -86,3 +86,26 @@ func TestRecentOutboundMessagesAndUpdateComment(t *testing.T) {
 		t.Fatalf("updated ids = (%d,%d), want (55,55)", records[0].CommentID, records[0].RootCommentID)
 	}
 }
+
+func TestOutboundMessagesForTrackingUsesCursor(t *testing.T) {
+	setupSQLiteMessageStreamTest(t)
+	records := []OutboundMessage{
+		{Source: "ai_reply", LinkID: 1, CommentID: 1, Text: "new-b", CreatedAt: 300, UniqueKey: "b"},
+		{Source: "ai_reply", LinkID: 1, CommentID: 2, Text: "new-a", CreatedAt: 300, UniqueKey: "a"},
+		{Source: "ai_reply", LinkID: 1, CommentID: 3, Text: "old", CreatedAt: 200, UniqueKey: "c"},
+		{Source: "ai_reply", LinkID: 1, CommentID: 4, Text: "too-old", CreatedAt: 100, UniqueKey: "d"},
+	}
+	for _, record := range records {
+		if !SaveOutboundMessage(record) {
+			t.Fatalf("SaveOutboundMessage(%q) returned false", record.Text)
+		}
+	}
+	first := OutboundMessagesForTracking(150, 0, "", 2)
+	if len(first) != 2 || first[0].UniqueKey != "b" || first[1].UniqueKey != "a" {
+		t.Fatalf("first batch = %#v, want b,a", first)
+	}
+	second := OutboundMessagesForTracking(150, first[1].CreatedAt, first[1].UniqueKey, 2)
+	if len(second) != 1 || second[0].UniqueKey != "c" {
+		t.Fatalf("second batch = %#v, want c", second)
+	}
+}

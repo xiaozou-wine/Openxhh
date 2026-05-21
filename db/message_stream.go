@@ -187,19 +187,24 @@ func SaveInboundMessage(record InboundMessage) bool {
 }
 
 func RecentOutboundMessages(since int64, limit int) []OutboundMessage {
+	return OutboundMessagesForTracking(since, 0, "", limit)
+}
+
+func OutboundMessagesForTracking(since int64, beforeCreatedAt int64, beforeUniqueKey string, limit int) []OutboundMessage {
 	if !messageStreamDatabaseReady() {
 		return nil
 	}
-	query := "SELECT source,link_id,root_comment_id,reply_comment_id,comment_id,text,image_url,created_at,raw_response,unique_key FROM outbound_messages WHERE created_at >= ? ORDER BY created_at DESC"
-	args := []any{since}
-	if limit > 0 {
-		query += " LIMIT ?"
-		args = append(args, limit)
-	}
 	if cfg.Type == "pg" {
-		query = "SELECT source,link_id,root_comment_id,reply_comment_id,comment_id,text,image_url,created_at,raw_response,unique_key FROM outbound_messages WHERE created_at >= $1 ORDER BY created_at DESC"
+		query := "SELECT source,link_id,root_comment_id,reply_comment_id,comment_id,text,image_url,created_at,raw_response,unique_key FROM outbound_messages WHERE created_at >= $1"
+		args := []any{since}
+		if beforeCreatedAt > 0 {
+			query += " AND (created_at < $2 OR (created_at = $2 AND COALESCE(unique_key,'') < $3))"
+			args = append(args, beforeCreatedAt, strings.TrimSpace(beforeUniqueKey))
+		}
+		query += " ORDER BY created_at DESC, unique_key DESC"
 		if limit > 0 {
-			query += " LIMIT $2"
+			args = append(args, limit)
+			query += fmt.Sprintf(" LIMIT $%d", len(args))
 		}
 		rows, err := pg.Conn.Query(context.Background(), query, args...)
 		if err != nil {
@@ -210,6 +215,17 @@ func RecentOutboundMessages(since int64, limit int) []OutboundMessage {
 		return scanOutboundRows(rows)
 	}
 	if cfg.Type == "sqlite" {
+		query := "SELECT source,link_id,root_comment_id,reply_comment_id,comment_id,text,image_url,created_at,raw_response,unique_key FROM outbound_messages WHERE created_at >= ?"
+		args := []any{since}
+		if beforeCreatedAt > 0 {
+			query += " AND (created_at < ? OR (created_at = ? AND COALESCE(unique_key,'') < ?))"
+			args = append(args, beforeCreatedAt, beforeCreatedAt, strings.TrimSpace(beforeUniqueKey))
+		}
+		query += " ORDER BY created_at DESC, unique_key DESC"
+		if limit > 0 {
+			query += " LIMIT ?"
+			args = append(args, limit)
+		}
 		rows, err := sqlite.Db.Query(query, args...)
 		if err != nil {
 			loger.Loger.Warn("[DB]无法读取发出消息", zap.Error(err))

@@ -43,17 +43,19 @@ type authStore struct {
 
 type appConfig struct {
 	Xhh struct {
-		CheckTime                int    `json:"checkTime"`
-		ReplyTime                int    `json:"replyTime"`
-		MaxReplyThreads          int    `json:"maxReplyThreads"`
-		MaxPendingReplies        int    `json:"maxPendingReplies"`
-		MaxPendingRepliesPerUser int    `json:"maxPendingRepliesPerUser"`
-		EnableWhitelist          bool   `json:"enableWhitelist"`
-		Owner                    string `json:"owner"`
-		DeviceID                 string `json:"deviceID"`
-		BaseURL                  string `json:"baseUrl"`
-		WebVer                   string `json:"webver"`
-		Ver                      string `json:"version"`
+		CheckTime                   int    `json:"checkTime"`
+		ReplyTime                   int    `json:"replyTime"`
+		MaxReplyThreads             int    `json:"maxReplyThreads"`
+		MaxPendingReplies           int    `json:"maxPendingReplies"`
+		MaxPendingRepliesPerUser    int    `json:"maxPendingRepliesPerUser"`
+		MessageStreamTrackDays      int    `json:"messageStreamTrackDays"`
+		MessageStreamTrackBatchSize int    `json:"messageStreamTrackBatchSize"`
+		EnableWhitelist             bool   `json:"enableWhitelist"`
+		Owner                       string `json:"owner"`
+		DeviceID                    string `json:"deviceID"`
+		BaseURL                     string `json:"baseUrl"`
+		WebVer                      string `json:"webver"`
+		Ver                         string `json:"version"`
 	} `json:"xhh"`
 	DataBase struct {
 		Type   string `json:"type"`
@@ -528,6 +530,10 @@ func applyConfigDefaults(cfg *appConfig) bool {
 	}
 	if cfg.Xhh.MaxPendingRepliesPerUser <= 0 {
 		cfg.Xhh.MaxPendingRepliesPerUser = 5
+		changed = true
+	}
+	if cfg.Xhh.MessageStreamTrackBatchSize <= 0 {
+		cfg.Xhh.MessageStreamTrackBatchSize = 120
 		changed = true
 	}
 	if cfg.Xhh.BaseURL == "" {
@@ -1198,6 +1204,8 @@ const indexHTML = `<!doctype html>
               <div class="field"><label>最高回复线程</label><input class="input" data-path="xhh.maxReplyThreads" data-type="number"></div>
               <div class="field"><label>最大待回复队列</label><input class="input" data-path="xhh.maxPendingReplies" data-type="number"></div>
               <div class="field"><label>单用户待回复上限</label><input class="input" data-path="xhh.maxPendingRepliesPerUser" data-type="number"></div>
+              <div class="field"><label>消息流追踪天数</label><input class="input" data-path="xhh.messageStreamTrackDays" data-type="number"><small class="hint">0 表示永久追踪历史机器人发言</small></div>
+              <div class="field"><label>每轮追踪数量</label><input class="input" data-path="xhh.messageStreamTrackBatchSize" data-type="number"></div>
               <label class="switch field wide"><span>启用白名单（关闭时回复所有 @，仍识别 owner）</span><input data-path="xhh.enableWhitelist" data-type="bool" type="checkbox"></label>
               <div class="field wide"><label>Owner / 白名单 UID（英文逗号分隔）</label><input class="input" data-path="xhh.owner"></div>
               <div class="field"><label>Device ID</label><input class="input" data-path="xhh.deviceID"></div>

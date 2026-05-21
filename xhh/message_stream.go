@@ -1,6 +1,7 @@
 package xhh
 
 import (
+	"openxhh/config"
 	"openxhh/db"
 	"openxhh/loger"
 	"strconv"
@@ -11,10 +12,14 @@ import (
 )
 
 const messageStreamTrackInterval = 120 * time.Second
-const messageStreamTrackWindow = 24 * time.Hour
-const messageStreamTrackLimit = 120
+const defaultMessageStreamTrackBatchSize = 120
 const messageStreamSubCommentPageBudget = 40
 const messageStreamVerboseMissWindow = 10 * time.Minute
+
+var messageStreamTrackCursor struct {
+	CreatedAt int64
+	UniqueKey string
+}
 
 func TrackInboundReplies() {
 	for {
@@ -24,8 +29,9 @@ func TrackInboundReplies() {
 }
 
 func processOutboundReplyTrackingOnce() {
-	since := time.Now().Add(-messageStreamTrackWindow).Unix()
-	outbounds := db.RecentOutboundMessages(since, messageStreamTrackLimit)
+	since := messageStreamTrackSince()
+	limit := messageStreamTrackBatchSize()
+	outbounds := nextOutboundMessagesForTracking(since, limit)
 	if len(outbounds) == 0 {
 		return
 	}
@@ -41,8 +47,38 @@ func processOutboundReplyTrackingOnce() {
 		saved += result.Saved
 	}
 	if saved > 0 || unresolved > 0 {
-		loger.Loger.Info("[MessageStream]评论我的追踪完成", zap.Int("checked", len(outbounds)), zap.Int("located", located), zap.Int("unresolved_bot_comment", unresolved), zap.Int("saved", saved))
+		loger.Loger.Info("[MessageStream]评论我的追踪完成", zap.Int("checked", len(outbounds)), zap.Int("located", located), zap.Int("unresolved_bot_comment", unresolved), zap.Int("saved", saved), zap.Int64("track_since", since), zap.Int("batch_size", limit))
 	}
+}
+
+func nextOutboundMessagesForTracking(since int64, limit int) []db.OutboundMessage {
+	outbounds := db.OutboundMessagesForTracking(since, messageStreamTrackCursor.CreatedAt, messageStreamTrackCursor.UniqueKey, limit)
+	if len(outbounds) == 0 && messageStreamTrackCursor.CreatedAt > 0 {
+		messageStreamTrackCursor.CreatedAt = 0
+		messageStreamTrackCursor.UniqueKey = ""
+		outbounds = db.OutboundMessagesForTracking(since, 0, "", limit)
+	}
+	if len(outbounds) > 0 {
+		last := outbounds[len(outbounds)-1]
+		messageStreamTrackCursor.CreatedAt = last.CreatedAt
+		messageStreamTrackCursor.UniqueKey = last.UniqueKey
+	}
+	return outbounds
+}
+
+func messageStreamTrackSince() int64 {
+	days := config.ConfigStruct.Xhh.MessageStreamTrackDays
+	if days <= 0 {
+		return 0
+	}
+	return time.Now().Add(-time.Duration(days) * 24 * time.Hour).Unix()
+}
+
+func messageStreamTrackBatchSize() int {
+	if config.ConfigStruct.Xhh.MessageStreamTrackBatchSize > 0 {
+		return config.ConfigStruct.Xhh.MessageStreamTrackBatchSize
+	}
+	return defaultMessageStreamTrackBatchSize
 }
 
 type messageStreamTrackResult struct {
