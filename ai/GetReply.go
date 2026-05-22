@@ -48,7 +48,34 @@ func GetAiReplyWithPrompt(prompt string, Contents []Content, UserSay string, Top
 	appendTokenRecord(aiModel, resp.Usage.TotalToken)
 	replyFields := append([]zap.Field{zap.String("text", text), zap.Int("本次消耗token", resp.Usage.TotalToken)}, logFields...)
 	loger.Loger.Info("[Ai]Ai说：", replyFields...)
+	if isRejectionReply(text) {
+		loger.Loger.Warn("[Ai]Ai拒绝回答（安全审核）", append(logFields, zap.String("text", text))...)
+		return ""
+	}
 	return text
+}
+
+func isRejectionReply(text string) bool {
+	lower := strings.ToLower(text)
+	for _, p := range rejectionPatterns {
+		if strings.Contains(lower, p) {
+			return true
+		}
+	}
+	return false
+}
+
+var rejectionPatterns = []string{
+	"request was rejected",
+	"high risk",
+	"content_policy",
+	"content policy violation",
+	"safety system",
+	"blocked by openai",
+	"refused to respond",
+	"unable to process this request",
+	"违反了内容政策",
+	"违规内容",
 }
 
 func applyPromptVariables(prompt string, Topics []Topics, Tags []Tags) string {
