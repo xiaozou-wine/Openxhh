@@ -517,17 +517,14 @@ func resolveRouteMentionTarget(routeTarget, ruleTarget, userText string) string 
 }
 
 func isLeadingWakeMentionTarget(target, text string) bool {
-	target = normalizeMentionName(target)
-	remaining := strings.TrimSpace(NormalizeCommentText(text))
-	for strings.HasPrefix(remaining, "@") {
-		token := mentionTokenPattern.FindString(remaining)
-		if token == "" || !strings.HasPrefix(remaining, token) {
-			return false
-		}
-		if normalizeMentionName(strings.TrimPrefix(token, "@")) == target {
+	if target == "" {
+		return false
+	}
+	normalized := strings.TrimSpace(NormalizeCommentText(text))
+	for _, m := range mentionTokenPattern.FindAllString(normalized, -1) {
+		if normalizeMentionName(strings.TrimPrefix(m, "@")) == target {
 			return true
 		}
-		remaining = strings.TrimSpace(strings.TrimPrefix(remaining, token))
 	}
 	return false
 }
