@@ -462,7 +462,10 @@ func replyComment(v db.CommStruct) {
 			mentionControl.TargetText = route.MentionTarget
 			mentionControl.HasExplicitTarget = true
 		}
-		loger.Loger.Info("[XHH]AI路由完成", zap.Int("msg_id", v.MsgID), zap.Int("comment_id", v.CommentID), zap.Int("link_id", v.LinkID), zap.Int("user_id", v.Uid), zap.String("user_name", v.UserName), zap.String("action", route.Action), zap.String("reason", route.Reason), zap.String("image_prompt", route.ImagePrompt), zap.String("mention_target", route.MentionTarget), zap.Bool("needs_post_context", route.NeedsPostContext), zap.Bool("needs_comment_context", route.NeedsCommentContext), zap.Bool("needs_image_input", route.NeedsImageInput), zap.Bool("wants_similar_image", route.WantsSimilarImage))
+		if route.MentionTargetUserID != 0 {
+			mentionControl.MentionTargetUserID = route.MentionTargetUserID
+		}
+		loger.Loger.Info("[XHH]AI路由完成", zap.Int("msg_id", v.MsgID), zap.Int("comment_id", v.CommentID), zap.Int("link_id", v.LinkID), zap.Int("user_id", v.Uid), zap.String("user_name", v.UserName), zap.String("action", route.Action), zap.String("reason", route.Reason), zap.String("image_prompt", route.ImagePrompt), zap.String("mention_target", route.MentionTarget), zap.Int("mention_target_user_id", route.MentionTargetUserID), zap.Bool("needs_post_context", route.NeedsPostContext), zap.Bool("needs_comment_context", route.NeedsCommentContext), zap.Bool("needs_image_input", route.NeedsImageInput), zap.Bool("wants_similar_image", route.WantsSimilarImage))
 		switch route.Action {
 		case ai.CommentRouteActionImage:
 			isok = processRoutedImageComment(v, mentionControl, &route)
@@ -542,6 +545,9 @@ func buildCommentRouteRequest(v db.CommStruct, userText string, mentionControl M
 		MentionTarget:     mentionControl.TargetText,
 		HasExplicitTarget: mentionControl.HasExplicitTarget,
 	}
+	if v.RootID != 0 {
+		routeReq.CommentContext = GetCommentContextText(v.LinkID, v.RootID, v.CommentID)
+	}
 	if command, ok := ParseImageCommand(textForRules); ok && !looksLikeImageDiscussion(textForRules) {
 		routeReq.RuleImageCandidate = true
 		routeReq.RuleImagePrompt = command.Prompt
@@ -596,7 +602,13 @@ func replyWithAiComment(v db.CommStruct, mentionControl MentionControl) bool {
 	if explicitMention == "" {
 		explicitMention = GetExplicitMentionFromPost(v.LinkID, mentionControl.CleanedText, v.Uid)
 	}
-	if mentionTarget && isPronounTarget(mentionControl.TargetText) {
+	if mentionControl.MentionTargetUserID != 0 && !isBotUserID(mentionControl.MentionTargetUserID) {
+		if username := FindCommentUserName(v.LinkID, v.RootID, v.CommentID, mentionControl.MentionTargetUserID); username != "" {
+			ReplyText = buildMention(mentionControl.MentionTargetUserID, username) + " " + ReplyText
+		} else if mentionTarget {
+			ReplyText = mention + " " + ReplyText
+		}
+	} else if mentionTarget && isPronounTarget(mentionControl.TargetText) {
 		ReplyText = mention + " " + ReplyText
 	} else if explicitMention != "" {
 		ReplyText = explicitMention + " " + ReplyText
@@ -613,4 +625,8 @@ func isPronounTarget(target string) bool {
 	default:
 		return false
 	}
+}
+
+func isBotUserID(userID int) bool {
+	return Info.HeyBoxId != "" && strconv.Itoa(userID) == Info.HeyBoxId
 }

@@ -6,11 +6,12 @@ import (
 )
 
 type MentionControl struct {
-	CleanedText       string
-	SemanticText      string
-	TargetText        string
-	HasExplicitTarget bool
-	WakeOnly          bool
+	CleanedText         string
+	SemanticText        string
+	TargetText          string
+	HasExplicitTarget   bool
+	WakeOnly            bool
+	MentionTargetUserID int
 }
 
 const mentionNamePattern = `([^\s，,。.!！?？:：、@]{1,24})`

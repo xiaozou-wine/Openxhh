@@ -28,12 +28,14 @@ type CommentRouteRequest struct {
 	RuleNeedsPostContext    bool
 	RuleNeedsCommentContext bool
 	RuleNeedsImageInput     bool
+	CommentContext          string
 }
 
 type CommentRouteResult struct {
 	Action              string `json:"action"`
 	ImagePrompt         string `json:"image_prompt"`
 	MentionTarget       string `json:"mention_target"`
+	MentionTargetUserID int    `json:"mention_target_user_id"`
 	NeedsPostContext    bool   `json:"needs_post_context"`
 	NeedsCommentContext bool   `json:"needs_comment_context"`
 	NeedsImageInput     bool   `json:"needs_image_input"`
@@ -159,10 +161,16 @@ func commentRouteSystemPrompt() string {
 11. action=image 时，image_prompt 必须是适合图片生成模型的画面描述，主体优先来自用户指定的上下文来源。
 12. 如果用户要求根据帖子/评论/图片生成，当前路由阶段看不到完整上下文，不要凭空编造主体；image_prompt 应保留“根据帖子内容/当前评论楼层/参考图片生成...”这类上下文指向，后续 prompt refine 会填入细节。
 13. 用户附带的祝福、吐槽、夸奖、安慰、整活短句只作为画面情绪、立场或用途，不要覆盖上下文主体。
-14. 输出 JSON 格式：{"action":"reply","image_prompt":"","mention_target":"","needs_post_context":false,"needs_comment_context":false,"needs_image_input":false,"wants_similar_image":false,"reason":"..."}`
+14. 输出 JSON 格式：{"action":"reply","image_prompt":"","mention_target":"","mention_target_user_id":0,"needs_post_context":false,"needs_comment_context":false,"needs_image_input":false,"wants_similar_image":false,"reason":"..."}
+15. 如果评论上下文中提供了 [user_id:xxx] 标记，当你能确定 mention_target 指向某个具体用户时，必须输出 mention_target_user_id 为该用户的 user_id 数值。例如上下文里有 [user_id:87108878] 永雏小菲official 发了言，而用户说"反驳她"，则 mention_target_user_id 应为 87108878。
+16. 如果无法从上下文确定具体用户（比如代词指向不明确），mention_target_user_id 留 0。`
 }
 
 func buildCommentRoutePrompt(req CommentRouteRequest) string {
+	commentContext := req.CommentContext
+	if commentContext == "" {
+		commentContext = "无"
+	}
 	return fmt.Sprintf(`原始评论：%s
 归一化文本：%s
 清洗后文本：%s
@@ -171,6 +179,9 @@ func buildCommentRoutePrompt(req CommentRouteRequest) string {
 规则层是否命中生图候选：%v
 规则层 prompt：%s
 规则层上下文标记：needs_post_context=%v, needs_comment_context=%v, needs_image_input=%v
+
+评论楼层上下文（每行格式 [user_id:xxx] 用户名：内容）：
+%s
 
 请输出路由 JSON。无法确定时 action 选 reply。若 action=image，请给出最终 image_prompt 和所需上下文标记。
 `,
@@ -184,5 +195,6 @@ func buildCommentRoutePrompt(req CommentRouteRequest) string {
 		req.RuleNeedsPostContext,
 		req.RuleNeedsCommentContext,
 		req.RuleNeedsImageInput,
+		commentContext,
 	)
 }

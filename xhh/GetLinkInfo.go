@@ -2,6 +2,7 @@ package xhh
 
 import (
 	"encoding/json"
+	"fmt"
 	"html"
 	"io"
 	"openxhh/ai"
@@ -1126,4 +1127,54 @@ func appendCommentContext(Contents *[]ai.Content, comments []CommentInfo) {
 	if len(commentImages) > 0 {
 		*Contents = append(*Contents, commentImages...)
 	}
+}
+
+func GetCommentContextText(linkID, rootCommentID, commentID int) string {
+	resp, ok := fetchLinkInfoPage(linkID, 1)
+	if !ok {
+		return ""
+	}
+	comments := findCommentGroup(resp.Result.Comments, rootCommentID)
+	if comments == nil {
+		return ""
+	}
+	comments = fetchMoreSubComments(rootCommentID, commentID, comments)
+	var lines []string
+	for _, c := range comments {
+		if c.Text == "" {
+			continue
+		}
+		name := c.User.UserName
+		if name == "" {
+			name = "用户"
+		}
+		line := fmt.Sprintf("[user_id:%d] %s", c.UserID, name)
+		if c.ReplyUser.UserName != "" {
+			line += " 回复 " + c.ReplyUser.UserName
+		}
+		line += "：" + c.Text
+		lines = append(lines, line)
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return strings.Join(lines, "\n")
+}
+
+func FindCommentUserName(linkID, rootCommentID, commentID, targetUserID int) string {
+	resp, ok := fetchLinkInfoPage(linkID, 1)
+	if !ok {
+		return ""
+	}
+	comments := findCommentGroup(resp.Result.Comments, rootCommentID)
+	if comments == nil {
+		return ""
+	}
+	comments = fetchMoreSubComments(rootCommentID, commentID, comments)
+	for _, c := range comments {
+		if c.UserID == targetUserID && c.User.UserName != "" {
+			return c.User.UserName
+		}
+	}
+	return ""
 }
