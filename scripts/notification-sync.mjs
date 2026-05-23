@@ -22,8 +22,14 @@ function flag(name, fallback) {
 
 const DB_PATH = flag("db", "/opt/Openxhh/sql.db");
 const INTERVAL_SEC = parseInt(flag("interval", "60"), 10);
-const USER_DATA_DIR = flag("userdata", "/opt/Openxhh/chrome-profile");
 const NOTIFICATION_URL = "https://www.xiaoheihe.cn/message/home/comment";
+
+// ── Cookie 配置 ──
+// 从浏览器获取的 cookie，过期后需要更新
+// 运行时可通过 --cookie 参数或 XHH_COOKIE 环境变量传入
+const COOKIE_FLAG = flag("cookie", process.env.XHH_COOKIE || "");
+const COOKIE_FILE = flag("cookie-file", "/opt/Openxhh/tools/xhh_cookie.txt");
+const COOKIE_JSON = flag("cookie-json", "/opt/Openxhh/cookie.json");
 
 // ── 数据库 ──
 function initDB(db) {
@@ -141,16 +147,30 @@ async function main() {
   initDB(db);
   console.log(`[通知同步] 数据库: ${DB_PATH}`);
 
-  // 启动浏览器
+  // 读取 cookie
+  let cookieStr = COOKIE_FLAG;
+  if (!cookieStr && fs.existsSync(COOKIE_FILE)) {
+    cookieStr = fs.readFileSync(COOKIE_FILE, "utf8").trim();
+  }
+  if (!cookieStr && fs.existsSync(COOKIE_JSON)) {
+    try {
+      const cj = JSON.parse(fs.readFileSync(COOKIE_JSON, "utf8"));
+      if (cj.cookie) cookieStr = cj.cookie;
+    } catch (_) {}
+  }
+  if (!cookieStr) {
+    console.error(`[通知同步] 缺少 cookie。请通过以下任一方式提供：`);
+    console.error(`  1. --cookie "x_xhh_tokenid=xxx; user_heybox_id=93872966"`);
+    console.error(`  2. XHH_COOKIE="x_xhh_tokenid=xxx; user_heybox_id=93872966"`);
+    console.error(`  3. 写入 ${COOKIE_FILE}`);
+    console.error(`  4. 确保 ${COOKIE_JSON} 存在且包含 cookie 字段`);
+    process.exit(1);
+  }
+
+  // 启动浏览器（headless 模式）
   const browser = await puppeteer.launch({
-    headless: true,
-    args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-gpu",
-    ],
-    userDataDir: USER_DATA_DIR,
+    headless: "new",
+    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
   });
 
   const page = await browser.newPage();
@@ -158,6 +178,23 @@ async function main() {
   await page.setUserAgent(
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
   );
+
+  // 注入 cookie
+  const cookies = cookieStr.split(";").filter(c => c.trim()).map((c) => {
+    const [name, ...rest] = c.trim().split("=");
+    return { name: name.trim(), value: rest.join("="), domain: ".xiaoheihe.cn", path: "/" };
+  });
+  // 从 cookie.json 补充 heybox_id
+  if (fs.existsSync(COOKIE_JSON)) {
+    try {
+      const cj = JSON.parse(fs.readFileSync(COOKIE_JSON, "utf8"));
+      if (cj.heyboxId && !cookies.find(c => c.name === "heybox_id")) {
+        cookies.push({ name: "heybox_id", value: cj.heyboxId, domain: ".xiaoheihe.cn", path: "/" });
+      }
+    } catch (_) {}
+  }
+  await page.setCookie(...cookies);
+  console.log(`[通知同步] 已注入 ${cookies.length} 个 cookie`);
 
   console.log(`[通知同步] 打开 ${NOTIFICATION_URL} ...`);
   await page.goto(NOTIFICATION_URL, { waitUntil: "networkidle2", timeout: 30000 });
@@ -167,22 +204,9 @@ async function main() {
     return document.body.innerText.includes("登录") && !document.querySelector(".message-comment-item__container");
   });
   if (needLogin) {
-    console.log("[通知同步] 需要登录，请在浏览器中扫码登录...");
-    await page.goto("https://www.xiaoheihe.cn", { waitUntil: "networkidle2" });
-    // 非 headless 模式等待用户登录
-    await new Promise((resolve) => {
-      const check = setInterval(async () => {
-        const loggedIn = await page.evaluate(() => {
-          return !!document.querySelector("[class*=avatar]") || document.cookie.includes("x_xhh_tokenid");
-        });
-        if (loggedIn) {
-          clearInterval(check);
-          resolve();
-        }
-      }, 3000);
-    });
-    console.log("[通知同步] 登录成功，导航到通知页面...");
-    await page.goto(NOTIFICATION_URL, { waitUntil: "networkidle2", timeout: 30000 });
+    console.error("[通知同步] Cookie 已过期，请更新 cookie");
+    await browser.close();
+    process.exit(1);
   }
 
   // 首次抓取
@@ -193,7 +217,6 @@ async function main() {
   // 定时抓取
   setInterval(async () => {
     try {
-      // 刷新页面获取最新数据
       await page.goto(NOTIFICATION_URL, { waitUntil: "networkidle2", timeout: 30000 });
       await new Promise((r) => setTimeout(r, 2000));
       const count = await scrapeOnce(page, db);
@@ -205,11 +228,9 @@ async function main() {
     }
   }, INTERVAL_SEC * 1000);
 
-  // 保活：每 5 分钟发一个请求防止页面超时
+  // 保活
   setInterval(async () => {
-    try {
-      await page.evaluate(() => {});
-    } catch (_) {}
+    try { await page.evaluate(() => {}); } catch (_) {}
   }, 300_000);
 
   console.log(`[通知同步] 已启动，每 ${INTERVAL_SEC} 秒检查一次`);
