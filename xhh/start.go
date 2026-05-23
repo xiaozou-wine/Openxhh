@@ -16,6 +16,9 @@ func Start() {
 	go func() {
 		TrackInboundReplies()
 	}()
+	go func() {
+		SyncNotifications()
+	}()
 	if config.ConfigStruct.FeedReply.Enabled {
 		go func() {
 			AutoFeedReply()

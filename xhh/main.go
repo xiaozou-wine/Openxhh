@@ -279,29 +279,70 @@ func CheckAt() {
 	}
 
 	DontReply = false
-
-	// 调试：测试 list_type 接口
-	debugListTypeNotifications()
-
 	time.Sleep(time.Duration(CheckTime) * time.Second)
 	CheckAt()
 }
 
-func debugListTypeNotifications() {
-	for _, lt := range []int{0, 1, 2, 3, 4, 5} {
-		other := fmt.Sprintf("?list_type=%d&offset=0&limit=2&no_more=false", lt)
+func SyncNotifications() {
+	time.Sleep(messageStreamTrackStartupDelay)
+	for {
+		syncNotificationsOnce()
+		time.Sleep(60 * time.Second)
+	}
+}
+
+func syncNotificationsOnce() {
+	if remaining := xhhCaptchaCooldownRemaining(); remaining > 0 {
+		return
+	}
+	saved := 0
+	for page := 0; page < maxMessagePages; page++ {
+		offset := page * messagePageLimit
+		other := fmt.Sprintf("?list_type=0&offset=%v&limit=%v&no_more=false", offset, messagePageLimit)
 		resp := SendReq("GET", "/bbs/app/user/message", nil, other)
 		if resp == nil {
-			loger.Loger.Info("[调试]list_type 请求失败", zap.Int("list_type", lt))
-			continue
+			return
 		}
 		data, err := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if err != nil {
-			loger.Loger.Info("[调试]list_type 读取失败", zap.Int("list_type", lt), zap.Error(err))
-			continue
+			return
 		}
-		loger.Loger.Info("[调试]list_type 响应", zap.Int("list_type", lt), zap.String("body", string(data[:min(len(data), 500)])))
+		if !isHTTPSuccess(resp.StatusCode) {
+			handleXHHHTTPFailure("user_message", resp.StatusCode, string(data))
+			return
+		}
+		var msgResp Respo
+		if err := json.Unmarshal(data, &msgResp); err != nil {
+			return
+		}
+		if msgResp.Stat != "ok" {
+			if isXHHCaptchaStatus(msgResp.Stat) {
+				enterXHHCaptchaCooldown("notification_sync")
+			}
+			return
+		}
+		for _, v := range msgResp.Result.Messages {
+			if db.SaveInboundMessage(db.InboundMessage{
+				Source:        "notification",
+				MessageID:     int64(v.MsgID),
+				LinkID:        int64(v.LinkID),
+				RootCommentID: int64(v.RootCommentID),
+				CommentID:     int64(v.CommentID),
+				UserID:        int64(v.UserID),
+				UserName:      CleanXHHRichText(v.UserName),
+				Text:          CleanXHHRichText(v.CommentText),
+				CreatedAt:     inboundMessageCreatedAt(v),
+			}) {
+				saved++
+			}
+		}
+		if len(msgResp.Result.Messages) < messagePageLimit {
+			break
+		}
+	}
+	if saved > 0 {
+		loger.Loger.Info("[通知同步]新增通知", zap.Int("saved", saved))
 	}
 }
 
