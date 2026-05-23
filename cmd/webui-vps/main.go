@@ -36,6 +36,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/mattn/go-sqlite3"
+	"openxhh/db"
 )
 
 const defaultAddr = ":29173"
@@ -1009,8 +1010,30 @@ func (s *serverState) refreshCommentThreadCache(cfg appConfig, session xhhSessio
 		return
 	}
 	if len(thread) > 0 {
+		saveCommentThreadToCache(record.LinkID, record.RootCommentID, thread)
 		fmt.Printf("[楼层缓存]后台刷新完成 link_id=%d count=%d\n", record.LinkID, len(thread))
 	}
+}
+
+func saveCommentThreadToCache(linkID int64, rootCommentID int64, thread []commentThreadItem) {
+	items := make([]db.CommentCacheItem, 0, len(thread))
+	for _, t := range thread {
+		items = append(items, db.CommentCacheItem{
+			LinkID:        linkID,
+			RootCommentID: rootCommentID,
+			CommentID:     int64(t.CommentID),
+			ReplyID:       int64(t.ReplyID),
+			FloorNum:      int64(t.FloorNum),
+			UserID:        int64(t.UserID),
+			UserName:      t.UserName,
+			AvatarURL:     t.AvatarURL,
+			ReplyUserName: t.ReplyUserName,
+			CreatedAt:     t.CreatedAt,
+			Text:          t.Text,
+			Images:        t.Images,
+		})
+	}
+	db.SaveCommentThreadCache(db.CommentCachePost{LinkID: linkID}, items)
 }
 
 func (s *serverState) handleCommentThread(w http.ResponseWriter, r *http.Request) {
