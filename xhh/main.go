@@ -344,7 +344,9 @@ func syncNotificationsOnce() {
 			return
 		}
 		for _, v := range msgResp.Result.Messages {
-			loger.Loger.Info("[DEBUG]通知字段", zap.Int("msg_id", v.MsgID), zap.Int("is_cy", v.IsCY), zap.String("user", v.UserName), zap.Int("msg_type", v.MessageType))
+			if v.IsCY != 0 {
+				loger.Loger.Info("[DEBUG]通知字段", zap.Int("msg_id", v.MsgID), zap.Int("is_cy", v.IsCY), zap.String("user", v.UserName), zap.Int("msg_type", v.MessageType))
+			}
 			if db.SaveInboundMessage(db.InboundMessage{
 				Source:        "notification",
 				MessageID:     int64(v.MsgID),
