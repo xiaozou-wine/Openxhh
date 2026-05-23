@@ -37,7 +37,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/mattn/go-sqlite3"
 	"openxhh/db"
-	"openxhh/xhh"
 )
 
 const defaultAddr = ":29173"
@@ -997,41 +996,29 @@ func (s *serverState) handleEmojis(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *serverState) refreshCommentThreadCache(cfg appConfig, session xhhSession, record commentThreadRecord, replyText string) {
-	rootID := int(record.RootCommentID)
-	if rootID <= 0 {
-		rootID = int(record.CommentID)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	var thread []commentThreadItem
+	var err error
+	var postTitle string
+	if record.CommentID > 0 || record.RootCommentID > 0 {
+		thread, err = fetchXHHCommentThread(ctx, cfg, session, record)
+	} else if record.LinkID > 0 {
+		thread, postTitle, err = fetchXHHPostComments(ctx, cfg, session, record.LinkID, replyText)
 	}
-	comments, actualRootID := xhh.FetchCommentFloor(int(record.LinkID), rootID)
-	if len(comments) > 0 && actualRootID > 0 {
-		thread := commentInfosToThreadItems(comments)
-		saveCommentThreadToCache(record.LinkID, int64(actualRootID), thread)
-		fmt.Printf("[楼层缓存]后台刷新完成 link_id=%d root=%d count=%d\n", record.LinkID, actualRootID, len(thread))
-	} else {
-		fmt.Printf("[楼层缓存]后台刷新无数据 link_id=%d root=%d\n", record.LinkID, rootID)
+	if err != nil {
+		fmt.Printf("[楼层缓存]后台刷新失败 link_id=%d err=%v\n", record.LinkID, err)
+		return
+	}
+	if len(thread) > 0 {
+		saveCommentThreadToCache(record.LinkID, record.RootCommentID, thread)
+		if postTitle != "" {
+			db.SaveCommentThreadCache(db.CommentCachePost{LinkID: record.LinkID, Title: postTitle}, nil)
+		}
+		fmt.Printf("[楼层缓存]后台刷新完成 link_id=%d count=%d\n", record.LinkID, len(thread))
 	}
 }
 
-func commentInfosToThreadItems(comments []xhh.CommentInfo) []commentThreadItem {
-	items := make([]commentThreadItem, len(comments))
-	for i, c := range comments {
-		items[i] = commentThreadItem{
-			CommentID:     int64(c.CommentID),
-			ReplyID:       int64(c.ReplyID),
-			FloorNum:      int64(c.FloorNum),
-			UserID:        int64(c.UserID),
-			UserName:      c.User.UserName,
-			ReplyUserName: c.ReplyUser.UserName,
-			Text:          c.Text,
-		}
-		if len(c.CreatedAt) > 0 {
-			var ts int64
-			if json.Unmarshal(c.CreatedAt, &ts) == nil && ts > 0 {
-				items[i].CreatedAt = time.Unix(ts, 0).Format("2006-01-02 15:04")
-			}
-		}
-	}
-	return items
-}
 
 func saveCommentThreadToCache(linkID int64, rootCommentID int64, thread []commentThreadItem) {
 	items := make([]db.CommentCacheItem, 0, len(thread))
@@ -1101,13 +1088,11 @@ func (s *serverState) handleCommentThread(w http.ResponseWriter, r *http.Request
 	session := s.loadXHHSession()
 	var thread []commentThreadItem
 	if record.CommentID > 0 || record.RootCommentID > 0 {
-		cachedThread, cachedTitle, cacheAge, ok := s.lookupSQLiteCommentThreadCache(cfg, record, payload.ReplyText)
+		cachedThread, cachedTitle, _, ok := s.lookupSQLiteCommentThreadCache(cfg, record, payload.ReplyText)
 		if ok && len(cachedThread) > 0 {
 			thread = cachedThread
 			postTitle = firstNonEmpty(postTitle, cachedTitle)
-			if cacheAge > 300 {
-				go s.refreshCommentThreadCache(cfg, session, record, payload.ReplyText)
-			}
+			go s.refreshCommentThreadCache(cfg, session, record, payload.ReplyText)
 		} else {
 			thread, err = fetchXHHCommentThread(r.Context(), cfg, session, record)
 			if err != nil || len(thread) == 0 {
@@ -1119,13 +1104,11 @@ func (s *serverState) handleCommentThread(w http.ResponseWriter, r *http.Request
 		}
 	} else {
 		mode = "post"
-		cachedThread, cachedTitle, cacheAge, ok := s.lookupSQLiteCommentThreadCache(cfg, record, payload.ReplyText)
+		cachedThread, cachedTitle, _, ok := s.lookupSQLiteCommentThreadCache(cfg, record, payload.ReplyText)
 		if ok && len(cachedThread) > 0 {
 			thread = cachedThread
 			postTitle = firstNonEmpty(postTitle, cachedTitle)
-			if cacheAge > 300 {
-				go s.refreshCommentThreadCache(cfg, session, record, payload.ReplyText)
-			}
+			go s.refreshCommentThreadCache(cfg, session, record, payload.ReplyText)
 		} else {
 			thread, postTitle, err = fetchXHHPostComments(r.Context(), cfg, session, record.LinkID, payload.ReplyText)
 			if err != nil || len(thread) == 0 {
