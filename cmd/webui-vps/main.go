@@ -997,10 +997,19 @@ func (s *serverState) handleEmojis(w http.ResponseWriter, r *http.Request) {
 func (s *serverState) refreshCommentThreadCache(cfg appConfig, session xhhSession, record commentThreadRecord, replyText string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
+	var thread []commentThreadItem
+	var err error
 	if record.CommentID > 0 || record.RootCommentID > 0 {
-		fetchXHHCommentThread(ctx, cfg, session, record)
+		thread, err = fetchXHHCommentThread(ctx, cfg, session, record)
 	} else if record.LinkID > 0 {
-		fetchXHHPostComments(ctx, cfg, session, record.LinkID, replyText)
+		thread, _, err = fetchXHHPostComments(ctx, cfg, session, record.LinkID, replyText)
+	}
+	if err != nil {
+		fmt.Printf("[楼层缓存]后台刷新失败 link_id=%d err=%v\n", record.LinkID, err)
+		return
+	}
+	if len(thread) > 0 {
+		fmt.Printf("[楼层缓存]后台刷新完成 link_id=%d count=%d\n", record.LinkID, len(thread))
 	}
 }
 
