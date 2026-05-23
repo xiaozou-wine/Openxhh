@@ -263,13 +263,10 @@ func trackedGroupComments(group commentGroup) ([]CommentInfo, int) {
 	if len(group.Comment) == 0 || group.Comment[0].CommentID <= 0 {
 		return nil, 0
 	}
-	rootID := group.Comment[0].CommentID
 	comments := make([]CommentInfo, len(group.Comment))
 	copy(comments, group.Comment)
-	if cached := cachedSubCommentInfos(rootID); len(cached) > 0 {
-		comments = append(comments, cached...)
-	}
 	budget := messageStreamSubCommentPageBudget
+	rootID := comments[0].CommentID
 	return fetchAllSubComments(rootID, comments, &budget), rootID
 }
 
