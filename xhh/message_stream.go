@@ -154,9 +154,6 @@ func trackOutboundReplies(outbound db.OutboundMessage) messageStreamTrackResult 
 			result.Saved++
 		}
 	}
-	if result.Saved > 0 {
-		loger.Loger.Info("[MessageStream]已保存评论我的消息", append(messageStreamOutboundFields(outbound, rootID, botCommentID), zap.Int("saved", result.Saved))...)
-	}
 	return result
 }
 
