@@ -44,6 +44,7 @@ type CommentInfo struct {
 	Imgs []struct {
 		Url string `json:"url"`
 	} `json:"imgs"`
+	IsCY int `json:"is_cy"`
 	ReplyUser struct {
 		UserName string `json:"username"`
 	} `json:"replyuser"`
@@ -238,6 +239,9 @@ func GetLinkInfo(LinkID int, RootCommentID int, CommentID int, CurrentUserID int
 	}
 
 	if selectedComments != nil {
+		for _, c := range selectedComments {
+			loger.Loger.Info("[DEBUG]评论字段", zap.Int("comment_id", c.CommentID), zap.Int("is_cy", c.IsCY), zap.String("user", c.User.UserName), zap.Int("floor", c.FloorNum))
+		}
 		selectedComments = fetchMoreSubComments(RootCommentID, CommentID, selectedComments)
 		Mention = inferMentionTarget(selectedComments, CommentID, CurrentUserID)
 	}

@@ -271,7 +271,6 @@ func CheckAt() {
 			}
 
 			for _, v := range data.Result.Messages {
-				loger.Loger.Info("[DEBUG]消息字段", zap.Int("msg_id", v.MsgID), zap.Int("is_cy", v.IsCY), zap.String("user", v.UserName), zap.Int("msg_type", v.MessageType))
 				if shouldQueueMessage(v) {
 					db.InsertWithUserName(v.MsgID, v.CommentID, v.RootCommentID, v.LinkID, v.UserID, v.UserName, v.CommentText, DontReply)
 				}
