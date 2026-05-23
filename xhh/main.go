@@ -104,7 +104,6 @@ type Msg struct {
 	UserName      string
 	CreatedAt     int64
 	IsPost        bool
-	IsCY          int
 }
 
 func (m *Msg) UnmarshalJSON(data []byte) error {
@@ -122,7 +121,6 @@ func (m *Msg) UnmarshalJSON(data []byte) error {
 		Timestamp     json.RawMessage `json:"timestamp"`
 		Dateline      json.RawMessage `json:"dateline"`
 		MessageTime   json.RawMessage `json:"message_time"`
-		IsCY          int             `json:"is_cy"`
 		User          struct {
 			UserID   json.RawMessage `json:"userid"`
 			UserName string          `json:"username"`
@@ -147,7 +145,6 @@ func (m *Msg) UnmarshalJSON(data []byte) error {
 	}
 	m.MessageType = aux.MessageType
 	m.UserName = aux.User.UserName
-	m.IsCY = aux.IsCY
 	m.CreatedAt = firstJSONInt64(aux.CreatedAt, aux.CreateAt, aux.Time, aux.Timestamp, aux.Dateline, aux.MessageTime)
 	m.IsPost = aux.MessageType == messageTypeAtPost
 	if m.IsPost {
@@ -344,9 +341,6 @@ func syncNotificationsOnce() {
 			return
 		}
 		for _, v := range msgResp.Result.Messages {
-			if v.IsCY != 0 {
-				loger.Loger.Info("[DEBUG]通知字段", zap.Int("msg_id", v.MsgID), zap.Int("is_cy", v.IsCY), zap.String("user", v.UserName), zap.Int("msg_type", v.MessageType))
-			}
 			if db.SaveInboundMessage(db.InboundMessage{
 				Source:        "notification",
 				MessageID:     int64(v.MsgID),

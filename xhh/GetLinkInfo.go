@@ -44,7 +44,6 @@ type CommentInfo struct {
 	Imgs []struct {
 		Url string `json:"url"`
 	} `json:"imgs"`
-	IsCY int `json:"is_cy"`
 	ReplyUser struct {
 		UserName string `json:"username"`
 	} `json:"replyuser"`
