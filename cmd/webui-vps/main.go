@@ -42,7 +42,7 @@ const defaultAddr = ":29173"
 const journalName = "__journal__"
 const tokenRecordFileName = "token_records.jsonl"
 const maxConfigBodySize = 1 << 20
-const defaultFeedReplyPrompt = "你正在作为小黑盒用户回复帖子。请结合帖子内容写一句自然、有信息量、不像机器人的短评论；如果帖子不适合回复，或容易引战、广告、抽奖、敏感内容，请只输出 SKIP。"
+const defaultFeedReplyPrompt = "你正在作为小黑盒用户回复帖子。请结合帖子内容写一句自然、有信息量、不像机器人的短评论。"
 const maxRecordLinkLookupIDs = 300
 const webuiSessionCookieName = "xhh_vps_webui_session"
 const webuiSessionDuration = 7 * 24 * time.Hour
@@ -1760,7 +1760,26 @@ func firstNonZeroInt64(values ...int64) int64 {
 	return 0
 }
 
+var xhhRequestMu sync.Mutex
+var lastXHHRequestTime time.Time
+
+const xhhRequestMinInterval = 2 * time.Second
+
 func getXHHJSON(ctx context.Context, requestURL string, session xhhSession) (*http.Response, error) {
+	xhhRequestMu.Lock()
+	if !lastXHHRequestTime.IsZero() {
+		if wait := xhhRequestMinInterval - time.Since(lastXHHRequestTime); wait > 0 {
+			select {
+			case <-time.After(wait):
+			case <-ctx.Done():
+				xhhRequestMu.Unlock()
+				return nil, ctx.Err()
+			}
+		}
+	}
+	lastXHHRequestTime = time.Now()
+	xhhRequestMu.Unlock()
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
 	if err != nil {
 		return nil, err
@@ -3040,7 +3059,7 @@ func (s *serverState) scheduleRecordPostTitlesFill(cfg appConfig, linkIDs []int6
 		}
 		s.cacheFillUntil[id] = now.Add(10 * time.Minute)
 		selected = append(selected, id)
-		if len(selected) >= 8 {
+		if len(selected) >= 4 {
 			break
 		}
 	}
@@ -3583,7 +3602,7 @@ func (s *serverState) scheduleMessageStreamCacheFill(cfg appConfig, records ...[
 		}
 		s.cacheFillUntil[linkID] = now.Add(10 * time.Minute)
 		selected = append(selected, linkID)
-		if len(selected) >= 8 {
+		if len(selected) >= 4 {
 			break
 		}
 	}
@@ -3612,7 +3631,6 @@ func (s *serverState) fillMessageStreamCache(cfg appConfig, linkIDs []int64) {
 		if err != nil {
 			continue
 		}
-		time.Sleep(250 * time.Millisecond)
 	}
 }
 

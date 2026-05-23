@@ -6,7 +6,7 @@ import (
 	"os"
 )
 
-const defaultFeedReplyPrompt = "你正在作为小黑盒用户回复帖子。请结合帖子内容写一句自然、有信息量、不像机器人的短评论；如果帖子不适合回复，或容易引战、广告、抽奖、敏感内容，请只输出 SKIP。"
+const defaultFeedReplyPrompt = "你正在作为小黑盒用户回复帖子。请结合帖子内容写一句自然、有信息量、不像机器人的短评论。"
 
 var ConfigStruct struct {
 	Xhh struct {
@@ -17,6 +17,7 @@ var ConfigStruct struct {
 		MaxPendingRepliesPerUser    int    `json:"maxPendingRepliesPerUser"`
 		MessageStreamTrackDays      int    `json:"messageStreamTrackDays"`
 		MessageStreamTrackBatchSize int    `json:"messageStreamTrackBatchSize"`
+		MinRequestInterval          int    `json:"minRequestInterval"`
 		EnableWhitelist             bool   `json:"enableWhitelist"`
 		Owner                       string `json:"owner"`
 		DeviceID                    string `json:"deviceID"`
@@ -121,6 +122,10 @@ func applyDefaults() bool {
 	}
 	if ConfigStruct.Xhh.MessageStreamTrackBatchSize <= 0 {
 		ConfigStruct.Xhh.MessageStreamTrackBatchSize = 120
+		changed = true
+	}
+	if ConfigStruct.Xhh.MinRequestInterval <= 0 {
+		ConfigStruct.Xhh.MinRequestInterval = 2
 		changed = true
 	}
 	if ConfigStruct.Xhh.BaseUrl == "" {

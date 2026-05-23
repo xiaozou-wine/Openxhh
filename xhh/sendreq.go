@@ -8,11 +8,35 @@ import (
 	"openxhh/loger"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"go.uber.org/zap"
 )
 
+var sendReqMu sync.Mutex
+var lastSendReqTime time.Time
+
+func minSendReqInterval() time.Duration {
+	interval := config.ConfigStruct.Xhh.MinRequestInterval
+	if interval <= 0 {
+		return 2 * time.Second
+	}
+	return time.Duration(interval) * time.Second
+}
+
 func SendReq(Method, Path string, Body io.Reader, other string) *http.Response {
+	sendReqMu.Lock()
+	defer sendReqMu.Unlock()
+
+	if !lastSendReqTime.IsZero() {
+		elapsed := time.Since(lastSendReqTime)
+		if wait := minSendReqInterval() - elapsed; wait > 0 {
+			time.Sleep(wait)
+		}
+	}
+	lastSendReqTime = time.Now()
+
 	cfg := config.ConfigStruct.Xhh
 	baseURL := strings.TrimRight(strings.TrimSpace(cfg.BaseUrl), "/")
 	if baseURL == "" {
@@ -32,7 +56,7 @@ func SendReq(Method, Path string, Body io.Reader, other string) *http.Response {
 		return nil
 	}
 	reqUrl := u.Query()
-	hkey, nonce, time := GetKeys(Path)
+	hkey, nonce, reqTime := GetKeys(Path)
 	reqUrl.Set("os_type", "web")
 	reqUrl.Set("app", "web")
 	reqUrl.Set("client_type", "web")
@@ -47,7 +71,7 @@ func SendReq(Method, Path string, Body io.Reader, other string) *http.Response {
 	reqUrl.Set("device_info", "Chrome")
 	reqUrl.Set("device_id", cfg.DeviceID)
 	reqUrl.Set("hkey", hkey)
-	reqUrl.Set("_time", strconv.Itoa(time))
+	reqUrl.Set("_time", strconv.Itoa(reqTime))
 	reqUrl.Set("nonce", nonce)
 	reqUrl.Set("_notip", "true")
 	u.RawQuery = reqUrl.Encode()
