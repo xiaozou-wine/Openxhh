@@ -166,6 +166,13 @@ func SaveInboundMessage(record InboundMessage) bool {
 		loger.Loger.Warn("[DB]无法检查收到消息是否存在", zap.Error(err), zap.String("source", record.Source), zap.Int64("comment_id", record.CommentID))
 		return false
 	}
+	if inserted && record.CommentID > 0 {
+		if updated, err := inboundDedupeByCommentID(record); err != nil {
+			loger.Loger.Warn("[DB]无法按comment_id去重", zap.Error(err), zap.Int64("comment_id", record.CommentID))
+		} else if updated {
+			return false
+		}
+	}
 	ctx := context.Background()
 	if cfg.Type == "pg" {
 		_, err := pg.Conn.Exec(ctx, `INSERT INTO inbound_messages (source,message_id,link_id,root_comment_id,reply_comment_id,comment_id,user_id,user_name,text,created_at,raw_response,unique_key)
@@ -218,6 +225,50 @@ func inboundMessageIsNew(uniqueKey string) (bool, error) {
 		return false, nil
 	}
 	return false, nil
+}
+
+func inboundDedupeByCommentID(record InboundMessage) (bool, error) {
+	if record.CommentID <= 0 {
+		return false, nil
+	}
+	var existingSource string
+	if cfg.Type == "pg" {
+		err := pg.Conn.QueryRow(context.Background(), "SELECT source FROM inbound_messages WHERE comment_id=$1 AND unique_key<>$2 LIMIT 1", record.CommentID, record.UniqueKey).Scan(&existingSource)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				return false, nil
+			}
+			return false, err
+		}
+	} else if cfg.Type == "sqlite" {
+		err := sqlite.Db.QueryRow("SELECT source FROM inbound_messages WHERE comment_id=? AND unique_key<>? LIMIT 1", record.CommentID, record.UniqueKey).Scan(&existingSource)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				return false, nil
+			}
+			return false, err
+		}
+	} else {
+		return false, nil
+	}
+	if inboundSourceIsFromApp(existingSource) {
+		if cfg.Type == "pg" {
+			_, err := pg.Conn.Exec(context.Background(), "UPDATE inbound_messages SET source=$1 WHERE comment_id=$2 AND source=$3", record.Source, record.CommentID, existingSource)
+			if err != nil {
+				return false, err
+			}
+		} else if cfg.Type == "sqlite" {
+			_, err := sqlite.Db.Exec("UPDATE inbound_messages SET source=? WHERE comment_id=? AND source=?", record.Source, record.CommentID, existingSource)
+			if err != nil {
+				return false, err
+			}
+		}
+	}
+	return true, nil
+}
+
+func inboundSourceIsFromApp(source string) bool {
+	return source == "at_comment" || source == "at_post"
 }
 
 func RecentOutboundMessages(since int64, limit int) []OutboundMessage {
