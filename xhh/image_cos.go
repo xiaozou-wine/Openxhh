@@ -18,10 +18,13 @@ import (
 	"net/http"
 	"net/url"
 	"openxhh/config"
+	"openxhh/loger"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
+
+	"go.uber.org/zap"
 )
 
 const (
@@ -279,13 +282,24 @@ func callbackXHHCOSUpload(ctx context.Context, key string) (string, error) {
 	if parsed.Status != "ok" {
 		return "", xhhCOSStatusError("XHH COS upload callback", parsed.Status, parsed.Msg)
 	}
+	loger.Loger.Debug("[XHH]COS callback 响应", zap.Strings("preview_urls", parsed.Result.PreviewURLs), zap.Strings("thumbs", parsed.Result.Thumbs))
 	if len(parsed.Result.PreviewURLs) > 0 {
-		return parsed.Result.PreviewURLs[0], nil
+		return normalizeXHHCOSCallbackURL(parsed.Result.PreviewURLs[0]), nil
 	}
 	if len(parsed.Result.Thumbs) > 0 {
-		return parsed.Result.Thumbs[0], nil
+		return normalizeXHHCOSCallbackURL(parsed.Result.Thumbs[0]), nil
 	}
 	return "", nil
+}
+
+// normalizeXHHCOSCallbackURL 将回调返回的 COS 直连 URL 转换为 CDN URL
+// COS bucket 没有公有读权限，必须走 CDN 域名才能访问
+func normalizeXHHCOSCallbackURL(rawURL string) string {
+	cosHost := xhhCOSBucket + ".cos." + xhhCOSRegion + ".myqcloud.com"
+	if strings.Contains(rawURL, cosHost) {
+		return strings.Replace(rawURL, "https://"+cosHost, "https://"+xhhCDNHost, 1)
+	}
+	return rawURL
 }
 
 func postXHHCOSAPI(ctx context.Context, path, extraQuery, body string) ([]byte, error) {
