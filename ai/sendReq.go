@@ -117,7 +117,6 @@ func SendReq(Model string, Msg []any) (Jresp respStruct) {
 		loger.Loger.Error("[AI]无法序列化JSON", zap.Error(err))
 		return
 	}
-	stripped := false
 	for i, payload := range payloads {
 		req, err := http.NewRequest("POST", cfg.BaseUrl, bytes.NewReader(payload.Body))
 		if err != nil {
@@ -141,14 +140,17 @@ func SendReq(Model string, Msg []any) (Jresp respStruct) {
 		}
 		if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 			bodyStr := string(Dresp)
-			if resp.StatusCode == http.StatusBadRequest && strings.Contains(bodyStr, "failed to download url") && !stripped {
-				loger.Loger.Warn("[Ai]图片下载失败，去掉图片重试", zap.String("variant", payload.Name))
-				newPayloads, bErr := rebuildWithoutImages(Model, Msg)
-				if bErr == nil && len(newPayloads) > 0 {
-					payloads = newPayloads
-					stripped = true
-					i = -1
-					continue
+			if resp.StatusCode == http.StatusBadRequest && strings.Contains(bodyStr, "failed to download url") {
+				failedURL := extractFailedImageURL(bodyStr)
+				if failedURL != "" {
+					loger.Loger.Warn("[Ai]图片下载失败，去掉失败图片重试", zap.String("failed_url", failedURL), zap.String("variant", payload.Name))
+					newPayloads, newMsg, bErr := rebuildWithoutImage(Model, Msg, failedURL)
+					if bErr == nil && len(newPayloads) > 0 {
+						payloads = newPayloads
+						Msg = newMsg
+						i = -1
+						continue
+					}
 				}
 			}
 			if i < len(payloads)-1 && shouldTryNextResponsesPayload(resp.StatusCode) {
@@ -441,32 +443,46 @@ func parseResponsesResp(data []byte) (respStruct, error) {
 	return resp, nil
 }
 
-func rebuildWithoutImages(Model string, Msg []any) ([]aiRequestPayload, error) {
-	stripped := stripImagesFromMessages(Msg)
+func extractFailedImageURL(body string) string {
+	// error format: "failed to download url data: https://..."
+	idx := strings.Index(body, "failed to download url data: ")
+	if idx < 0 {
+		return ""
+	}
+	rest := body[idx+len("failed to download url data: "):]
+	end := strings.IndexAny(rest, "\"\\}")
+	if end < 0 {
+		return strings.TrimSpace(rest)
+	}
+	return strings.TrimSpace(rest[:end])
+}
+
+func rebuildWithoutImage(Model string, Msg []any, failedURL string) ([]aiRequestPayload, []any, error) {
+	newMsg := removeImageFromMessages(Msg, failedURL)
 	cfg := config.ConfigStruct.Ai
 	if useResponsesAPI(cfg.BaseUrl) {
-		primary, err := buildResponsesReqBody(Model, stripped, false)
+		primary, err := buildResponsesReqBody(Model, newMsg, false)
 		if err != nil {
-			return nil, err
+			return nil, Msg, err
 		}
-		legacy, err := buildResponsesReqBody(Model, stripped, true)
+		legacy, err := buildResponsesReqBody(Model, newMsg, true)
 		if err != nil {
-			return nil, err
+			return nil, Msg, err
 		}
-		return []aiRequestPayload{{Name: "responses+noimg", Body: primary}, {Name: "responses_compat+noimg", Body: legacy}}, nil
+		return []aiRequestPayload{{Name: "responses+noimg", Body: primary}, {Name: "responses_compat+noimg", Body: legacy}}, newMsg, nil
 	}
-	body := BodyStruct{Model: Model, Msgs: stripped, Stream: false}
+	body := BodyStruct{Model: Model, Msgs: newMsg, Stream: false}
 	if aiWebSearchEnabled() {
 		body.WebSearchOptions = &webSearchOptions{SearchContextSize: aiSearchContextSize()}
 	}
 	data, err := json.Marshal(body)
 	if err != nil {
-		return nil, err
+		return nil, Msg, err
 	}
-	return []aiRequestPayload{{Name: "chat_completions+noimg", Body: data}}, nil
+	return []aiRequestPayload{{Name: "chat_completions+noimg", Body: data}}, newMsg, nil
 }
 
-func stripImagesFromMessages(Msg []any) []any {
+func removeImageFromMessages(Msg []any, targetURL string) []any {
 	out := make([]any, 0, len(Msg))
 	for _, msg := range Msg {
 		data, err := json.Marshal(msg)
@@ -493,23 +509,27 @@ func stripImagesFromMessages(Msg []any) []any {
 			out = append(out, msg)
 			continue
 		}
-		var stripped []Content
+		var filtered []Content
 		for i, c := range contents {
-			if c.Type == "image_url" {
-				if i > 0 && len(stripped) > 0 && contents[i-1].Type == "text" &&
-					stripped[len(stripped)-1].Text == contents[i-1].Text {
-					stripped = stripped[:len(stripped)-1]
+			if c.Type == "image_url" && strings.Contains(c.ImgUrl.Url, targetURL) {
+				if i > 0 && len(filtered) > 0 && contents[i-1].Type == "text" &&
+					filtered[len(filtered)-1].Text == contents[i-1].Text {
+					filtered = filtered[:len(filtered)-1]
 				}
 				continue
 			}
-			stripped = append(stripped, c)
+			filtered = append(filtered, c)
 		}
-		if len(stripped) == 0 {
+		if len(filtered) == len(contents) {
+			out = append(out, msg)
+			continue
+		}
+		if len(filtered) == 0 {
 			continue
 		}
 		var m map[string]json.RawMessage
 		json.Unmarshal(data, &m)
-		newContent, _ := json.Marshal(stripped)
+		newContent, _ := json.Marshal(filtered)
 		m["content"] = newContent
 		out = append(out, m)
 	}
