@@ -2191,7 +2191,11 @@ func (s *serverState) openSQLiteDatabase() (*sql.DB, error) {
 	}
 	database.SetMaxOpenConns(1)
 	database.SetMaxIdleConns(1)
-	if _, err := database.Exec("PRAGMA busy_timeout=8000"); err != nil {
+	if _, err := database.Exec("PRAGMA busy_timeout=5000"); err != nil {
+		database.Close()
+		return nil, err
+	}
+	if _, err := database.Exec("PRAGMA journal_mode=WAL"); err != nil {
 		database.Close()
 		return nil, err
 	}
